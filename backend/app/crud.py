@@ -26,7 +26,7 @@ def create_scan(
         target=target,
         status=ScanStatus.PENDING.value,
         started_at=datetime.utcnow(),
-        result_json=options or {}
+        options=options or {}
     )
     db.add(scan)
     db.commit()
