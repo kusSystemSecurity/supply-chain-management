@@ -1,7 +1,7 @@
 """Scan management API endpoints"""
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict
 from enum import Enum
 import logging
@@ -53,8 +53,7 @@ class ScanDetail(BaseModel):
     medium_count: int
     low_count: int
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class VulnerabilitySummary(BaseModel):
@@ -68,8 +67,7 @@ class VulnerabilitySummary(BaseModel):
     epss_score: Optional[float]
     epss_predicted: bool = False
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 @router.post("/trigger", response_model=ScanResponse)

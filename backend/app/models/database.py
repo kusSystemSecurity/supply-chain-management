@@ -6,7 +6,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import relationship
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 import enum
 
@@ -74,11 +74,11 @@ class Scan(Base):
     target = Column(String(500), nullable=False)
     status = Column(String(20), nullable=False, default=ScanStatus.PENDING.value)
     options = Column(JSON, nullable=True)
-    started_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    started_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     completed_at = Column(DateTime, nullable=True)
     result_json = Column(JSON, nullable=True)
     error_message = Column(String(1000), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
     vulnerabilities = relationship("Vulnerability", back_populates="scan", cascade="all, delete-orphan")
@@ -99,7 +99,7 @@ class Vulnerability(Base):
     epss_score = Column(Float, nullable=True)
     epss_predicted = Column(Boolean, default=False)
     cve_details = Column(JSON, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
     scan = relationship("Scan", back_populates="vulnerabilities")
@@ -123,7 +123,7 @@ class AIAnalysis(Base):
     output_data = Column(JSON, nullable=True)
     tokens_used = Column(Integer, nullable=True)
     processing_time_ms = Column(Integer, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
     scan = relationship("Scan", back_populates="ai_analyses")
