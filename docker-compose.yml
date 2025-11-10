@@ -1,0 +1,95 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: securechain-postgres
+    environment:
+      POSTGRES_DB: securechain
+      POSTGRES_USER: securechain
+      POSTGRES_PASSWORD: securechain_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U securechain"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - securechain-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: securechain-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - securechain-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: securechain-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://securechain:securechain_password@postgres:5432/securechain
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CVEDETAILS_API_KEY: ${CVEDETAILS_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      DEBUG: "True"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - /var/run/docker.sock:/var/run/docker.sock  # For Trivy container scanning
+    networks:
+      - securechain-network
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Optional: Celery worker for async tasks
+  # celery-worker:
+  #   build:
+  #     context: ./backend
+  #     dockerfile: Dockerfile
+  #   container_name: securechain-celery
+  #   depends_on:
+  #     - postgres
+  #     - redis
+  #     - backend
+  #   environment:
+  #     DATABASE_URL: postgresql://securechain:securechain_password@postgres:5432/securechain
+  #     REDIS_URL: redis://redis:6379/0
+  #     CELERY_BROKER_URL: redis://redis:6379/1
+  #     ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  #   volumes:
+  #     - ./backend:/app
+  #   networks:
+  #     - securechain-network
+  #   command: celery -A app.celery_app worker --loglevel=info
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  securechain-network:
+    driver: bridge
