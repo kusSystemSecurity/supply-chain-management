@@ -1,4 +1,5 @@
 """Main FastAPI application"""
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
@@ -15,13 +16,44 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application startup and shutdown events"""
+    logger.info("SecureChain AI API starting up...")
+    logger.info(f"Debug mode: {settings.debug}")
+    logger.info(f"Database URL: {settings.database_url.split('@')[1] if '@' in settings.database_url else settings.database_url}")
+
+    # Test database connection
+    if test_connection():
+        logger.info("✅ Database connection successful")
+
+        # Initialize database (create tables if they don't exist)
+        try:
+            init_db()
+            logger.info("✅ Database initialized")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize database: {e}")
+            logger.warning("API will start but database operations may fail")
+    else:
+        logger.error("❌ Database connection failed")
+        logger.warning("API will start but database operations will fail")
+
+    logger.info(f"API will be available at http://{settings.api_host}:{settings.api_port}")
+
+    yield
+
+    logger.info("SecureChain AI API shutting down...")
+
+
 # Create FastAPI app
 app = FastAPI(
     title="SecureChain AI API",
     description="AI-powered software supply chain security analysis platform",
     version="0.1.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan
 )
 
 # Configure CORS
@@ -56,37 +88,6 @@ async def health_check():
         "service": "securechain-ai",
         "version": "0.1.0"
     }
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Application startup event"""
-    logger.info("SecureChain AI API starting up...")
-    logger.info(f"Debug mode: {settings.debug}")
-    logger.info(f"Database URL: {settings.database_url.split('@')[1] if '@' in settings.database_url else settings.database_url}")
-
-    # Test database connection
-    if test_connection():
-        logger.info("✅ Database connection successful")
-
-        # Initialize database (create tables if they don't exist)
-        try:
-            init_db()
-            logger.info("✅ Database initialized")
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize database: {e}")
-            logger.warning("API will start but database operations may fail")
-    else:
-        logger.error("❌ Database connection failed")
-        logger.warning("API will start but database operations will fail")
-
-    logger.info(f"API will be available at http://{settings.api_host}:{settings.api_port}")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Application shutdown event"""
-    logger.info("SecureChain AI API shutting down...")
 
 
 if __name__ == "__main__":

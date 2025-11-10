@@ -2,7 +2,7 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 from app.models.database import Scan, Vulnerability, AIAnalysis, ScanStatus
@@ -25,7 +25,7 @@ def create_scan(
         scan_type=scan_type,
         target=target,
         status=ScanStatus.PENDING.value,
-        started_at=datetime.utcnow(),
+        started_at=datetime.now(timezone.utc),
         options=options or {}
     )
     db.add(scan)
@@ -79,7 +79,7 @@ def update_scan_status(
     if result_json:
         scan.result_json = result_json
     if status == ScanStatus.COMPLETED.value:
-        scan.completed_at = datetime.utcnow()
+        scan.completed_at = datetime.now(timezone.utc)
 
     db.commit()
     db.refresh(scan)

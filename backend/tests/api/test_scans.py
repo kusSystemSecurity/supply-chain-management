@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 from sqlalchemy.orm import Session
 from uuid import UUID, uuid4
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.api.scans import ScanTypeEnum
 from app.models.database import Scan, Vulnerability, ScanStatus
@@ -20,7 +20,7 @@ def scans_in_db(db_session: Session):
         {"id": uuid4(), "scan_type": "git_repo", "status": "completed", "target": "repo3"},
     ]
 
-    scans = [Scan(started_at=datetime.utcnow(), **d) for d in scans_data]
+    scans = [Scan(started_at=datetime.now(timezone.utc), **d) for d in scans_data]
     db_session.bulk_save_objects(scans)
     db_session.commit()
     return scans
@@ -35,7 +35,7 @@ def scan_with_vulnerabilities(db_session: Session):
         scan_type="container",
         status="completed",
         target="test-image:latest",
-        started_at=datetime.utcnow()
+        started_at=datetime.now(timezone.utc)
     )
     db_session.add(scan)
     db_session.commit()
@@ -114,8 +114,8 @@ def test_get_scan_success(client: TestClient, db_session: Session):
         scan_type="git_repo",
         target="https://github.com/test/repo",
         status="completed",
-        started_at=datetime.utcnow(),
-        completed_at=datetime.utcnow(),
+        started_at=datetime.now(timezone.utc),
+        completed_at=datetime.now(timezone.utc),
     )
     db_session.add(scan)
     db_session.commit()
