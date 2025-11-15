@@ -33,6 +33,7 @@ ENV/
 
 # IDEs
 .vscode/
+*.code-workspace
 .idea/
 *.swp
 *.swo
