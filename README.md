@@ -20,7 +20,7 @@ SecureChain AI is a comprehensive platform for securing software supply chains t
 
 - **Multi-format Vulnerability Scanning**: Git repositories, containers, VMs, SBOMs, Kubernetes
 - **ML-based EPSS Prediction**: Predict exploitation probability when data is unavailable
-- **AI-Powered Analysis**: Three specialized AI agents for prioritization, supply chain impact, and remediation
+- **AI-Powered Analysis**: Specialized AI agents for supply chain security analysis
 - **Modern Web UI**: Beautiful, responsive Next.js interface with real-time updates
 - **Database Persistence**: PostgreSQL for reliable data storage
 
@@ -28,7 +28,7 @@ SecureChain AI is a comprehensive platform for securing software supply chains t
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Frontend (Next.js 15)                    │
+│                         Frontend                            │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐     │
 │  │Dashboard │  │  Scans   │  │  Vulns   │  │    AI    │     │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘     │
@@ -51,9 +51,6 @@ SecureChain AI is a comprehensive platform for securing software supply chains t
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │              AI Agents (LLM API)                     │   │
-│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐  │   │
-│  │  │Prioritization│ │Supply Chain  │ │ Remediation  │  │   │
-│  │  └──────────────┘ └──────────────┘ └──────────────┘  │   │
 │  └──────────────────────────────────────────────────────┘   │
 └───────────────────────────┬─────────────────────────────────┘
                             │

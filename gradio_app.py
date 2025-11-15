@@ -4,453 +4,34 @@ A simplified Python-only interface for the SecureChain AI platform.
 """
 
 import gradio as gr
-from datetime import datetime
-from typing import List, Dict, Optional
-import uuid
-from enum import Enum
-import subprocess
-import json
-import logging
-import os
-import requests
-from typing import Tuple
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
-
-
-# ============= Data Models =============
-
-
-class ScanType(str, Enum):
-    """Scan type enumeration"""
-
-    GIT_REPO = "git_repo"
-    CONTAINER = "container"
-    VM = "vm"
-    SBOM = "sbom"
-    K8S = "k8s"
-
-
-class ScanStatus(str, Enum):
-    """Scan status enumeration"""
-
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
-# ============= In-Memory Storage =============
-
-# Simple in-memory storage (replace with database in production)
-scans_storage: List[Dict] = []
-vulnerabilities_storage: List[Dict] = []
-
-
-# ============= Helper Functions =============
-
-
-def fetch_cve_details(cve_id: str) -> Dict:
-    """
-    Fetch CVE details from CVEDetails API
-
-    Args:
-        cve_id: CVE ID (e.g., "CVE-2025-38664")
-
-    Returns:
-        Dictionary with CVE details or error info
-    """
-    # NOTE: In production, store API key securely (.env file, etc.)
-
-    api_key = os.getenv("CVEDETAILS_API_KEY", "")
-    if not api_key:
-        return {
-            "success": False,
-            "error": "CVEDetails API key not configured. Set CVEDETAILS_API_KEY in .env file.",
-        }
-
-    try:
-        url = "https://www.cvedetails.com/api/v1/vulnerability/info"
-        params = {
-            "cveId": cve_id,
-            "returnAffectedCPEs": "true",
-            "returnRiskScore": "true",
-            "returnAlternativeIds": "true",
-        }
-        headers = {"Authorization": f"Bearer {api_key}", "accept": "*/*"}
-
-        response = requests.get(url, params=params, headers=headers, timeout=30)
-        response.raise_for_status()
-
-        data = response.json()
-        return {"success": True, "data": data}
-
-    except requests.exceptions.RequestException as e:
-        return {"success": False, "error": f"API request failed: {str(e)}"}
-    except json.JSONDecodeError as e:
-        return {"success": False, "error": f"Invalid JSON response: {str(e)}"}
-    except Exception as e:
-        return {"success": False, "error": f"Unexpected error: {str(e)}"}
-
-
-def fetch_epss_scores(cve_ids: List[str]) -> Dict[str, Dict]:
-    """
-    Fetch EPSS scores for multiple CVEs from FIRST.org API
-
-    Args:
-        cve_ids: List of CVE IDs
-
-    Returns:
-        Dictionary mapping CVE IDs to their EPSS data
-    """
-    if not cve_ids:
-        return {}
-
-    try:
-        # EPSS API allows up to 100 CVEs per request
-        # Split into batches if needed
-        batch_size = 50
-        epss_data = {}
-
-        for i in range(0, len(cve_ids), batch_size):
-            batch = cve_ids[i : i + batch_size]
-            cve_param = ",".join(batch)
-
-            url = "https://api.first.org/data/v1/epss"
-            params = {
-                "cve": cve_param,
-                "pretty": "false",  # We don't need pretty formatting
-            }
-
-            response = requests.get(url, params=params, timeout=30)
-            response.raise_for_status()
-
-            data = response.json()
-
-            if data.get("status") == "OK" and "data" in data:
-                for item in data["data"]:
-                    cve_id = item.get("cve")
-                    if cve_id:
-                        epss_data[cve_id] = {
-                            "epss_score": float(item.get("epss", 0)),
-                            "epss_percentile": float(item.get("percentile", 0)),
-                            "epss_date": item.get("date"),
-                        }
-
-        return epss_data
-
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching EPSS scores: {e}")
-        return {}
-    except Exception as e:
-        print(f"Unexpected error fetching EPSS scores: {e}")
-        return {}
-
-
-def update_vulnerability_with_cve_details(cve_id: str, cve_api_details: dict):
-    """
-    Update existing vulnerability with CVE API details
-
-    Args:
-        cve_id: CVE ID to update
-        cve_api_details: Raw CVE API response data
-    """
-    for vuln in vulnerabilities_storage:
-        if vuln.get("cve_id") == cve_id:
-            vuln["cve_api_details"] = cve_api_details
-            print(f"Updated vulnerability {cve_id} with API details")
-            break
-
-
-def check_trivy_installed() -> bool:
-    """Check if Trivy is installed"""
-    try:
-        result = subprocess.run(
-            ["docker", "run", "--rm", "aquasec/trivy", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
-def install_trivy() -> bool:
-    """Install Trivy via Docker (pull the image)"""
-    try:
-        print("Installing Trivy via Docker...")
-        result = subprocess.run(
-            ["docker", "pull", "aquasec/trivy"],
-            capture_output=True,
-            text=True,
-            timeout=300,  # 5 minutes timeout
-        )
-        return result.returncode == 0
-    except Exception as e:
-        print(f"Error installing Trivy: {e}")
-        return False
-
-
-def run_trivy_scan(scan_type: str, target: str) -> Dict:
-    """
-    Run actual Trivy scan and return results
-
-    Args:
-        scan_type: Type of scan (container, git_repo, etc.)
-        target: Target to scan
-
-    Returns:
-        Dictionary with scan results
-    """
-    try:
-        cmd = ["docker", "run", "--rm", "aquasec/trivy"]
-
-        # Configure scan based on type
-        if scan_type == "container":
-            cmd.extend(["image", "--format", "json", target])
-        elif scan_type == "git_repo":
-            cmd.extend(["repo", "--format", "json", target])
-        elif scan_type == "vm":
-            cmd.extend(["vm", "--format", "json", target])
-        elif scan_type == "sbom":
-            cmd.extend(["sbom", "--format", "json", target])
-        elif scan_type == "k8s":
-            cmd.extend(["k8s", "--format", "json", target])
-        else:
-            raise ValueError(f"Unsupported scan type: {scan_type}")
-
-        print(f"Running Trivy command: {' '.join(cmd)}")
-
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=600  # 10 minutes timeout
-        )
-
-        if result.returncode != 0:
-            error_msg = result.stderr.strip() or result.stdout.strip()
-            raise Exception(f"Trivy scan failed: {error_msg}")
-
-        # Parse JSON output
-        try:
-            trivy_output = json.loads(result.stdout)
-            return {"success": True, "data": trivy_output}
-        except json.JSONDecodeError as e:
-            return {"success": False, "error": f"Failed to parse Trivy output: {e}"}
-
-    except subprocess.TimeoutExpired:
-        return {"success": False, "error": "Scan timed out after 10 minutes"}
-    except Exception as e:
-        return {"success": False, "error": f"Scan failed: {str(e)}"}
-
-
-def parse_trivy_vulnerabilities(trivy_data: Dict, scan_id: str) -> List[Dict]:
-    """
-    Parse Trivy vulnerability data and return standardized format with EPSS scores
-
-    Args:
-        trivy_data: Raw Trivy JSON output
-        scan_id: Scan ID to associate vulnerabilities with
-
-    Returns:
-        List of vulnerability dictionaries with EPSS data
-    """
-    vulnerabilities = []
-    cve_ids = []
-
-    try:
-        # First pass: collect all CVE IDs and create vulnerability objects
-        if "Results" in trivy_data:
-            # Container/image scan format
-            for result in trivy_data.get("Results", []):
-                if "Vulnerabilities" in result:
-                    for vuln in result["Vulnerabilities"]:
-                        cve_id = vuln.get("VulnerabilityID", "Unknown")
-                        if cve_id.startswith("CVE-"):
-                            cve_ids.append(cve_id)
-
-                        vulnerabilities.append(
-                            {
-                                "id": str(uuid.uuid4()),
-                                "scan_id": scan_id,
-                                "cve_id": cve_id,
-                                "package_name": vuln.get("PkgName", "Unknown"),
-                                "package_version": vuln.get(
-                                    "InstalledVersion", "Unknown"
-                                ),
-                                "severity": vuln.get("Severity", "UNKNOWN"),
-                                "cvss_score": vuln.get("CVSS", {})
-                                .get("nvd", {})
-                                .get("V3Score")
-                                or vuln.get("CVSS", {}).get("nvd", {}).get("V2Score"),
-                                "epss_score": None,
-                                "epss_percentile": None,
-                                "epss_date": None,
-                                "epss_predicted": False,
-                                "cve_details": vuln,
-                            }
-                        )
-
-        elif "Vulnerabilities" in trivy_data:
-            # Direct vulnerability list format
-            for vuln in trivy_data["Vulnerabilities"]:
-                cve_id = vuln.get("VulnerabilityID", "Unknown")
-                if cve_id.startswith("CVE-"):
-                    cve_ids.append(cve_id)
-
-                vulnerabilities.append(
-                    {
-                        "id": str(uuid.uuid4()),
-                        "scan_id": scan_id,
-                        "cve_id": cve_id,
-                        "package_name": vuln.get("PkgName", "Unknown"),
-                        "package_version": vuln.get("InstalledVersion", "Unknown"),
-                        "severity": vuln.get("Severity", "UNKNOWN"),
-                        "cvss_score": vuln.get("CVSS", {}).get("nvd", {}).get("V3Score")
-                        or vuln.get("CVSS", {}).get("nvd", {}).get("V2Score"),
-                        "epss_score": None,
-                        "epss_percentile": None,
-                        "epss_date": None,
-                        "epss_predicted": False,
-                        "cve_details": vuln,
-                    }
-                )
-
-        elif isinstance(trivy_data, list):
-            # Some formats return list directly
-            for item in trivy_data:
-                if "Vulnerabilities" in item:
-                    for vuln in item["Vulnerabilities"]:
-                        cve_id = vuln.get("VulnerabilityID", "Unknown")
-                        if cve_id.startswith("CVE-"):
-                            cve_ids.append(cve_id)
-
-                        vulnerabilities.append(
-                            {
-                                "id": str(uuid.uuid4()),
-                                "scan_id": scan_id,
-                                "cve_id": cve_id,
-                                "package_name": vuln.get("PkgName", "Unknown"),
-                                "package_version": vuln.get(
-                                    "InstalledVersion", "Unknown"
-                                ),
-                                "severity": vuln.get("Severity", "UNKNOWN"),
-                                "cvss_score": vuln.get("CVSS", {})
-                                .get("nvd", {})
-                                .get("V3Score")
-                                or vuln.get("CVSS", {}).get("nvd", {}).get("V2Score"),
-                                "epss_score": None,
-                                "epss_percentile": None,
-                                "epss_date": None,
-                                "epss_predicted": False,
-                                "cve_details": vuln,
-                            }
-                        )
-
-        # Fetch EPSS scores for all collected CVE IDs
-        if cve_ids:
-            print(f"Fetching EPSS scores for {len(cve_ids)} CVEs...")
-            epss_data = fetch_epss_scores(cve_ids)
-
-            # Update vulnerabilities with EPSS data
-            for vuln in vulnerabilities:
-                cve_id = vuln.get("cve_id")
-                if cve_id in epss_data:
-                    vuln["epss_score"] = epss_data[cve_id]["epss_score"]
-                    vuln["epss_percentile"] = epss_data[cve_id]["epss_percentile"]
-                    vuln["epss_date"] = epss_data[cve_id]["epss_date"]
-                    vuln["epss_predicted"] = True  # Mark as having real EPSS data
-                    print(
-                        f"Updated {cve_id} with EPSS: {epss_data[cve_id]['epss_score']}"
-                    )
-
-    except Exception as e:
-        print(f"Error parsing Trivy vulnerabilities: {e}")
-        # Return empty list on parse error
-        pass
-
-    return vulnerabilities
-
-
-def create_scan(scan_type: str, target: str) -> Dict:
-    """Create a new scan"""
-    scan_id = str(uuid.uuid4())
-    scan = {
-        "id": scan_id,
-        "scan_type": scan_type,
-        "target": target,
-        "status": ScanStatus.PENDING.value,
-        "started_at": datetime.now().isoformat(),
-        "completed_at": None,
-        "vulnerability_count": 0,
-        "critical_count": 0,
-        "high_count": 0,
-        "medium_count": 0,
-        "low_count": 0,
-        "result_json": None,  # Store original Trivy JSON output
-    }
-    scans_storage.append(scan)
-    return scan
-
-
-def get_scan(scan_id: str) -> Optional[Dict]:
-    """Get scan by ID"""
-    for scan in scans_storage:
-        if scan["id"] == scan_id:
-            return scan
-    return None
-
-
-def get_all_scans() -> List[Dict]:
-    """Get all scans"""
-    return scans_storage.copy()
-
-
-def update_scan_status(
-    scan_id: str, status: str, vulnerability_count: int = 0, result_json: dict = None
-):
-    """Update scan status"""
-    scan = get_scan(scan_id)
-    if scan:
-        scan["status"] = status
-        if status == ScanStatus.COMPLETED.value:
-            scan["completed_at"] = datetime.now().isoformat()
-            scan["vulnerability_count"] = vulnerability_count
-        if result_json is not None:
-            scan["result_json"] = result_json
-
-
-def add_vulnerability(
-    scan_id: str,
-    cve_id: str,
-    package_name: str = None,
-    package_version: str = None,
-    severity: str = None,
-    cvss_score: float = None,
-    epss_score: float = None,
-    cve_api_details: dict = None,
-):
-    """Add vulnerability to storage"""
-    vuln = {
-        "id": str(uuid.uuid4()),
-        "scan_id": scan_id,
-        "cve_id": cve_id,
-        "package_name": package_name,
-        "package_version": package_version,
-        "severity": severity or "UNKNOWN",
-        "cvss_score": cvss_score,
-        "epss_score": epss_score,
-        "epss_predicted": False,
-        "cve_api_details": cve_api_details,  # Store raw CVEDetails API response
-    }
-    vulnerabilities_storage.append(vuln)
-    return vuln
-
-
-def get_vulnerabilities_by_scan(scan_id: str) -> List[Dict]:
-    """Get all vulnerabilities for a scan"""
-    return [v for v in vulnerabilities_storage if v["scan_id"] == scan_id]
+from typing import List
+
+# Import backend modules
+from backend import (
+    ScanType,
+    ScanStatus,
+    scans_storage,
+    vulnerabilities_storage,
+    create_scan,
+    get_scan,
+    get_all_scans,
+    update_scan_status,
+    add_vulnerability,
+    get_vulnerabilities_by_scan,
+    update_vulnerability_with_cve_details,
+    fetch_cve_details,
+    check_trivy_installed,
+    install_trivy,
+    run_trivy_scan,
+    parse_trivy_vulnerabilities,
+    create_project,
+    get_project,
+    get_all_projects,
+    assign_scan_to_project,
+    get_scans_by_project,
+    run_ai_analysis,
+    get_ai_analyses_by_project,
+)
 
 
 # ============= Gradio Interface Functions =============
@@ -499,7 +80,8 @@ def trigger_scan(scan_type: str, target: str) -> str:
 
             # Parse vulnerabilities from Trivy output
             trivy_data = scan_result["data"]
-            vulnerabilities = parse_trivy_vulnerabilities(trivy_data, scan["id"])
+            vulnerabilities = parse_trivy_vulnerabilities(
+                trivy_data, scan["id"])
 
             # Store vulnerabilities
             for vuln in vulnerabilities:
@@ -588,8 +170,10 @@ def refresh_scan_list() -> List[List]:
                 started_at = scan.get("started_at", "")
 
                 # Format display values safely
-                short_id = (scan_id[:8] + "...") if len(scan_id) > 8 else scan_id
-                truncated_target = (target[:50] + "...") if len(target) > 50 else target
+                short_id = (
+                    scan_id[:8] + "...") if len(scan_id) > 8 else scan_id
+                truncated_target = (
+                    target[:50] + "...") if len(target) > 50 else target
                 formatted_time = (
                     started_at[:19]
                     if started_at and len(started_at) >= 19
@@ -704,7 +288,8 @@ def get_scan_vulnerabilities(scan_id: str) -> tuple:
         info = f"✅ Found {len(vulnerabilities)} vulnerability/vulnerabilities"
 
         # Check if any vulnerabilities have CVE API details
-        cve_details_count = sum(1 for v in vulnerabilities if v.get("cve_api_details"))
+        cve_details_count = sum(
+            1 for v in vulnerabilities if v.get("cve_api_details"))
 
         if scan:
             target = scan.get("target", "Unknown")
@@ -789,6 +374,8 @@ def get_scan_raw_json(selected_option: str) -> str:
         return "⚠️ Please select an option from the dropdown above."
 
     try:
+        import json
+
         # Check if it's a CVE ID
         if selected_option.upper().startswith("CVE"):
             # Look for CVE API details in vulnerabilities
@@ -800,8 +387,6 @@ def get_scan_raw_json(selected_option: str) -> str:
                 if vuln.get("cve_id") == cve_id and vuln.get("cve_api_details"):
                     # Pretty-print the CVE API JSON
                     try:
-                        import json
-
                         formatted_json = json.dumps(
                             vuln["cve_api_details"], indent=2, ensure_ascii=False
                         )
@@ -817,7 +402,8 @@ def get_scan_raw_json(selected_option: str) -> str:
         elif selected_option.startswith("Scan: "):
             # Extract scan ID from "Scan: abc123..."
             scan_display = selected_option[6:]  # Remove "Scan: " prefix
-            scan_id = scan_display.replace("...", "")  # Remove "..." if present
+            scan_id = scan_display.replace(
+                "...", "")  # Remove "..." if present
 
             # Find full scan ID
             full_scan_id = None
@@ -841,9 +427,8 @@ def get_scan_raw_json(selected_option: str) -> str:
 
             # Pretty-print the JSON
             try:
-                import json
-
-                formatted_json = json.dumps(result_json, indent=2, ensure_ascii=False)
+                formatted_json = json.dumps(
+                    result_json, indent=2, ensure_ascii=False)
                 return f"✅ Raw Trivy JSON for scan {scan_id}...\n\n{formatted_json}"
             except Exception:
                 return f"✅ Raw Trivy JSON for scan {scan_id}...\n\n{result_json}"
@@ -889,7 +474,8 @@ def create_scan_tab():
         )
 
         submit_btn.click(
-            fn=trigger_scan, inputs=[scan_type, target_input], outputs=status_output
+            fn=trigger_scan, inputs=[scan_type,
+                                     target_input], outputs=status_output
         )
 
 
@@ -902,7 +488,8 @@ def create_scan_list_tab():
         refresh_btn = gr.Button("Refresh List", variant="secondary")
 
         scan_table = gr.Dataframe(
-            headers=["Scan ID", "Type", "Target", "Status", "Vulns", "Started At"],
+            headers=["Scan ID", "Type", "Target",
+                     "Status", "Vulns", "Started At"],
             label="Scans",
             interactive=False,
             wrap=True,
@@ -932,7 +519,8 @@ def create_vulnerability_tab():
 
         view_btn = gr.Button("View Vulnerabilities", variant="primary")
 
-        info_output = gr.Textbox(label="Scan Information", lines=3, interactive=False)
+        info_output = gr.Textbox(
+            label="Scan Information", lines=3, interactive=False)
 
         vuln_table = gr.Dataframe(
             headers=[
@@ -1015,7 +603,8 @@ def create_vulnerability_tab():
 
                 if result["success"]:
                     # Store raw CVE API data in vulnerabilities
-                    update_vulnerability_with_cve_details(cve_id, result["data"])
+                    update_vulnerability_with_cve_details(
+                        cve_id, result["data"])
 
                     # Return success message
                     return f"✅ CVE details fetched and stored successfully for {cve_id}.\n\nRaw JSON data is now available in the 'Raw JSON' tab."
@@ -1113,7 +702,7 @@ def create_raw_json_tab():
                     # Extract just the JSON part
                     json_start = json_content.find("\n\n")
                     if json_start != -1:
-                        json_data = json_content[json_start + 2 :]
+                        json_data = json_content[json_start + 2:]
                         return json_data
                 return "No JSON data available"
             except Exception:
@@ -1135,19 +724,398 @@ def create_raw_json_tab():
             outputs=None,  # Gradio handles clipboard copy
         )
 
-        # Dropdown is initialized with choices above, no need for load event
-
 
 def create_ai_analysis_tab():
-    """Create the AI analysis tab (stub)"""
+    """Create the AI analysis tab"""
     with gr.Column():
         gr.Markdown("## AI Analysis")
-        gr.Markdown("### AI Agent Functionality")
         gr.Markdown(
-            """
-            AI-analysis functionality is currently under development and will be available in a future update.
-            
-            """
+            "Use AI agents to analyze vulnerability scan data. Create projects, assign scans, and get intelligent insights."
+        )
+
+        # Project Management Section
+        with gr.Row():
+            with gr.Column(scale=2):
+                gr.Markdown("### Project Management")
+
+                project_name_input = gr.Textbox(
+                    label="Project Name",
+                    placeholder="e.g., my-web-app, production-backend",
+                    info="Enter a name for your project"
+                )
+
+                create_project_btn = gr.Button(
+                    "Create Project", variant="primary")
+                create_project_status = gr.Textbox(
+                    label="Status",
+                    lines=2,
+                    interactive=False,
+                    placeholder="Project creation status will appear here..."
+                )
+
+        with gr.Row():
+            with gr.Column(scale=2):
+                gr.Markdown("### Assign Scan to Project")
+
+                project_dropdown = gr.Dropdown(
+                    choices=[],
+                    label="Select Project",
+                    info="Choose a project to assign scans to"
+                )
+
+                scan_dropdown = gr.Dropdown(
+                    choices=[],
+                    label="Select Scan",
+                    info="Choose a scan to assign to the project"
+                )
+
+                refresh_scan_dropdown_btn = gr.Button(
+                    "Refresh Scan List", variant="secondary", size="sm")
+                assign_scan_btn = gr.Button("Assign Scan", variant="secondary")
+                assign_scan_status = gr.Textbox(
+                    label="Status",
+                    lines=2,
+                    interactive=False,
+                    placeholder="Assignment status will appear here..."
+                )
+
+        # AI Analysis Section
+        with gr.Row():
+            with gr.Column(scale=2):
+                gr.Markdown("### Run AI Analysis")
+
+                analysis_project_dropdown = gr.Dropdown(
+                    choices=[],
+                    label="Select Project for Analysis",
+                    info="Choose a project to analyze"
+                )
+
+                analysis_scans_checkbox = gr.CheckboxGroup(
+                    choices=[],
+                    label="Select Scans to Analyze",
+                    info="Select one or more scans to analyze (leave empty to analyze all scans in the project)",
+                    visible=False
+                )
+
+                run_analysis_btn = gr.Button(
+                    "Run AI Analysis", variant="primary")
+                analysis_status = gr.Textbox(
+                    label="Analysis Status",
+                    lines=3,
+                    interactive=False,
+                    placeholder="Analysis status will appear here..."
+                )
+
+        # Analysis Results Section
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### Analysis Results")
+
+                results_project_dropdown = gr.Dropdown(
+                    choices=[],
+                    label="Select Project to View Results",
+                    info="Choose a project to view previous analysis results"
+                )
+
+                view_results_btn = gr.Button(
+                    "View Results", variant="secondary")
+
+        with gr.Row():
+            prioritization_output = gr.Textbox(
+                label="Prioritization Analysis",
+                lines=10,
+                interactive=False,
+                placeholder="Prioritization analysis results will appear here..."
+            )
+
+        with gr.Row():
+            supply_chain_output = gr.Textbox(
+                label="Supply Chain Analysis",
+                lines=10,
+                interactive=False,
+                placeholder="Supply chain analysis results will appear here..."
+            )
+
+        with gr.Row():
+            remediation_output = gr.Textbox(
+                label="Remediation Guidance",
+                lines=10,
+                interactive=False,
+                placeholder="Remediation guidance will appear here..."
+            )
+
+        # Helper functions for UI
+        def update_project_dropdowns():
+            """Update all project dropdowns"""
+            projects = get_all_projects()
+            project_names = [p.get("name") for p in projects if p.get("name")]
+            return (
+                gr.Dropdown(choices=project_names),
+                gr.Dropdown(choices=project_names),
+                gr.Dropdown(choices=project_names),
+            )
+
+        def update_scan_dropdown():
+            """Update scan dropdown"""
+            scans = get_all_scans()
+            scan_options = [
+                f"{s.get('id', '')[:8]}... - {s.get('target', 'Unknown')[:50]}" for s in scans if s.get("id")]
+            return gr.Dropdown(choices=scan_options, value=scan_options[0] if scan_options else None)
+
+        def create_project_handler(project_name: str):
+            """Handle project creation"""
+            projects = get_all_projects()
+            project_names = [p.get("name") for p in projects if p.get("name")]
+
+            if not project_name or not project_name.strip():
+                return (
+                    "❌ Error: Please enter a project name.",
+                    gr.Dropdown(choices=project_names),
+                    gr.Dropdown(choices=project_names),
+                    gr.Dropdown(choices=project_names),
+                )
+
+            project_name = project_name.strip()
+            project = create_project(project_name)
+
+            # Refresh project list
+            projects = get_all_projects()
+            project_names = [p.get("name") for p in projects if p.get("name")]
+
+            if project.get("name") == project_name:
+                return (
+                    f"✅ Project '{project_name}' created successfully!",
+                    gr.Dropdown(choices=project_names),
+                    gr.Dropdown(choices=project_names),
+                    gr.Dropdown(choices=project_names),
+                )
+            else:
+                return (
+                    f"ℹ️ Project '{project_name}' already exists.",
+                    gr.Dropdown(choices=project_names),
+                    gr.Dropdown(choices=project_names),
+                    gr.Dropdown(choices=project_names),
+                )
+
+        def assign_scan_handler(project_name: str, scan_display: str):
+            """Handle scan assignment"""
+            projects = get_all_projects()
+            project_names = [p.get("name") for p in projects if p.get("name")]
+
+            if not project_name:
+                return (
+                    "❌ Error: Please select a project.",
+                    gr.Dropdown(choices=project_names),
+                    gr.Dropdown(choices=project_names),
+                    gr.Dropdown(choices=project_names),
+                )
+
+            if not scan_display:
+                return (
+                    "❌ Error: Please select a scan.",
+                    gr.Dropdown(choices=project_names),
+                    gr.Dropdown(choices=project_names),
+                    gr.Dropdown(choices=project_names),
+                )
+
+            # Extract scan_id from display string (format: "abc123... - target")
+            try:
+                scan_id_short = scan_display.split(" - ")[0].replace("...", "")
+                # Find full scan_id
+                full_scan_id = None
+                for scan in scans_storage:
+                    if scan.get("id", "").startswith(scan_id_short):
+                        full_scan_id = scan.get("id")
+                        break
+
+                if not full_scan_id:
+                    return (
+                        "❌ Error: Scan not found.",
+                        gr.Dropdown(choices=project_names),
+                        gr.Dropdown(choices=project_names),
+                        gr.Dropdown(choices=project_names),
+                    )
+
+                success = assign_scan_to_project(full_scan_id, project_name)
+
+                # Refresh project list
+                projects = get_all_projects()
+                project_names = [p.get("name")
+                                 for p in projects if p.get("name")]
+
+                if success:
+                    return (
+                        f"✅ Scan assigned to project '{project_name}' successfully!",
+                        gr.Dropdown(choices=project_names),
+                        gr.Dropdown(choices=project_names),
+                        gr.Dropdown(choices=project_names),
+                    )
+                else:
+                    return (
+                        f"❌ Error: Failed to assign scan to project.",
+                        gr.Dropdown(choices=project_names),
+                        gr.Dropdown(choices=project_names),
+                        gr.Dropdown(choices=project_names),
+                    )
+            except Exception as e:
+                return (
+                    f"❌ Error: {str(e)}",
+                    gr.Dropdown(choices=project_names),
+                    gr.Dropdown(choices=project_names),
+                    gr.Dropdown(choices=project_names),
+                )
+
+        def update_analysis_scans(project_name: str):
+            """Update scan checkboxes when project is selected"""
+            if not project_name:
+                return gr.CheckboxGroup(choices=[], visible=False)
+
+            scans = get_scans_by_project(project_name)
+            if not scans:
+                return gr.CheckboxGroup(choices=[], visible=False)
+
+            # Create scan display options: "scan_id_short - target"
+            scan_options = []
+            scan_id_map = {}  # Map display string to full scan_id
+
+            for scan in scans:
+                scan_id = scan.get("id", "")
+                target = scan.get("target", "Unknown")
+                scan_display = f"{scan_id[:8]}... - {target[:50]}"
+                scan_options.append(scan_display)
+                scan_id_map[scan_display] = scan_id
+
+            return gr.CheckboxGroup(choices=scan_options, visible=True)
+
+        def run_analysis_handler(project_name: str, selected_scans: List[str]):
+            """Handle AI analysis execution"""
+            if not project_name:
+                return (
+                    "❌ Error: Please select a project.",
+                    "",
+                    "",
+                    "",
+                )
+
+            # Convert selected scan display strings to scan IDs
+            # If no scans selected (empty list), analyze all scans in the project
+            selected_scan_ids = None
+            if selected_scans and len(selected_scans) > 0:
+                scans = get_scans_by_project(project_name)
+                scan_id_map = {}
+                for scan in scans:
+                    scan_id = scan.get("id", "")
+                    target = scan.get("target", "Unknown")
+                    scan_display = f"{scan_id[:8]}... - {target[:50]}"
+                    scan_id_map[scan_display] = scan_id
+
+                selected_scan_ids = [scan_id_map.get(
+                    display) for display in selected_scans if display in scan_id_map]
+                # Remove None values
+                selected_scan_ids = [sid for sid in selected_scan_ids if sid]
+
+                if not selected_scan_ids:
+                    return (
+                        "❌ Error: No valid scans selected. Please select scans from the list.",
+                        "",
+                        "",
+                        "",
+                    )
+
+            result = run_ai_analysis(project_name, selected_scan_ids)
+
+            if result.get("success"):
+                analysis = result.get("results", {})
+                scan_count = len(
+                    selected_scan_ids) if selected_scan_ids else "all"
+                status_msg = f"✅ Analysis completed successfully!\n\nProject: {project_name}\nScans analyzed: {scan_count}\nAnalyzed at: {analysis.get('analyzed_at', 'N/A')}"
+                return (
+                    status_msg,
+                    analysis.get("prioritization",
+                                 "No prioritization analysis available."),
+                    analysis.get("supply_chain",
+                                 "No supply chain analysis available."),
+                    analysis.get(
+                        "remediation", "No remediation guidance available."),
+                )
+            else:
+                error_msg = result.get("error", "Unknown error occurred.")
+                return (
+                    f"❌ Analysis failed: {error_msg}",
+                    "",
+                    "",
+                    "",
+                )
+
+        def view_results_handler(project_name: str):
+            """Handle viewing previous analysis results"""
+            if not project_name:
+                return (
+                    "",
+                    "",
+                    "",
+                )
+
+            analyses = get_ai_analyses_by_project(project_name)
+
+            if not analyses:
+                return (
+                    "ℹ️ No previous analyses found for this project.",
+                    "",
+                    "",
+                )
+
+            # Get the most recent analysis
+            latest_analysis = analyses[0]
+
+            return (
+                latest_analysis.get(
+                    "prioritization", "No prioritization analysis available."),
+                latest_analysis.get(
+                    "supply_chain", "No supply chain analysis available."),
+                latest_analysis.get(
+                    "remediation", "No remediation guidance available."),
+            )
+
+        # Event handlers
+        create_project_btn.click(
+            fn=create_project_handler,
+            inputs=[project_name_input],
+            outputs=[create_project_status, project_dropdown,
+                     analysis_project_dropdown, results_project_dropdown]
+        )
+
+        refresh_scan_dropdown_btn.click(
+            fn=update_scan_dropdown,
+            outputs=[scan_dropdown]
+        )
+
+        assign_scan_btn.click(
+            fn=assign_scan_handler,
+            inputs=[project_dropdown, scan_dropdown],
+            outputs=[assign_scan_status, project_dropdown,
+                     analysis_project_dropdown, results_project_dropdown]
+        )
+
+        # Update scan checkboxes when project is selected
+        analysis_project_dropdown.change(
+            fn=update_analysis_scans,
+            inputs=[analysis_project_dropdown],
+            outputs=[analysis_scans_checkbox]
+        )
+
+        run_analysis_btn.click(
+            fn=run_analysis_handler,
+            inputs=[analysis_project_dropdown, analysis_scans_checkbox],
+            outputs=[analysis_status, prioritization_output,
+                     supply_chain_output, remediation_output]
+        )
+
+        view_results_btn.click(
+            fn=view_results_handler,
+            inputs=[results_project_dropdown],
+            outputs=[prioritization_output,
+                     supply_chain_output, remediation_output]
         )
 
 
