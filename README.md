@@ -2,6 +2,18 @@
 
 AI-powered software supply chain security analysis platform with comprehensive vulnerability scanning, ML-based EPSS prediction, intelligent remediation assistance, and a modern web interface.
 
+## Setup
+
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. Configure environment variables:
+   - Copy `.env.example` to `.env`
+   - Set your CVE Details API key: `CVEDETAILS_API_KEY=your_api_key_here`
+   - Get your API key from: https://www.cvedetails.com/
+
 ## Overview
 
 SecureChain AI is a comprehensive platform for securing software supply chains through:
@@ -38,7 +50,7 @@ SecureChain AI is a comprehensive platform for securing software supply chains t
 │  │  └────────────────┘  └─────────────────────────┘     │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │              AI Agents (Claude API)                  │   │
+│  │              AI Agents (LLM API)                     │   │
 │  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐  │   │
 │  │  │Prioritization│ │Supply Chain  │ │ Remediation  │  │   │
 │  │  └──────────────┘ └──────────────┘ └──────────────┘  │   │
@@ -46,7 +58,7 @@ SecureChain AI is a comprehensive platform for securing software supply chains t
 └───────────────────────────┬─────────────────────────────────┘
                             │
 ┌───────────────────────────┴─────────────────────────────────┐
-│                   PostgreSQL Database                       │
+│                      In-Memory Storage                      │
 │  ┌──────────┐  ┌────────────────┐  ┌──────────────┐         │
 │  │  Scans   │  │Vulnerabilities │  │ AI Analyses  │         │
 │  └──────────┘  └────────────────┘  └──────────────┘         │
