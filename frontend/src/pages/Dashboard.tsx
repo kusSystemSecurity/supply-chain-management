@@ -4,7 +4,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Loading } from "@/components/loading"
 import { Scan, Shield, AlertTriangle, TrendingUp, Clock } from "lucide-react"
 import { useNavigate } from "react-router-dom"
-import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts"
+import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, CartesianGrid } from "recharts"
+import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart"
 
 const COLORS = {
   CRITICAL: "#ef4444",
@@ -128,8 +129,16 @@ export function Dashboard() {
           </CardHeader>
           <CardContent>
             {severityData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={300}>
+              <ChartContainer
+                config={{
+                  value: {
+                    label: "Count",
+                  },
+                }}
+                className="h-[300px] w-full"
+              >
                 <PieChart>
+                  <ChartTooltip content={<ChartTooltipContent />} />
                   <Pie
                     data={severityData}
                     cx="50%"
@@ -144,9 +153,8 @@ export function Dashboard() {
                       <Cell key={`cell-${index}`} fill={entry.color} />
                     ))}
                   </Pie>
-                  <Tooltip />
                 </PieChart>
-              </ResponsiveContainer>
+              </ChartContainer>
             ) : (
               <div className="flex items-center justify-center h-[300px] text-muted-foreground">
                 No vulnerabilities found
@@ -162,15 +170,35 @@ export function Dashboard() {
           </CardHeader>
           <CardContent>
             {statusData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={300}>
+              <ChartContainer
+                config={{
+                  value: {
+                    label: "Count",
+                  },
+                }}
+                className="h-[300px] w-full"
+              >
                 <BarChart data={statusData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="name" />
-                  <YAxis />
-                  <Tooltip />
-                  <Bar dataKey="value" fill="#8884d8" />
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                  <XAxis
+                    dataKey="name"
+                    tickLine={false}
+                    axisLine={false}
+                    tickMargin={8}
+                  />
+                  <YAxis
+                    tickLine={false}
+                    axisLine={false}
+                    tickMargin={8}
+                  />
+                  <ChartTooltip content={<ChartTooltipContent />} />
+                  <Bar
+                    dataKey="value"
+                    fill="hsl(var(--chart-1))"
+                    radius={4}
+                  />
                 </BarChart>
-              </ResponsiveContainer>
+              </ChartContainer>
             ) : (
               <div className="flex items-center justify-center h-[300px] text-muted-foreground">
                 No scans available
@@ -212,15 +240,14 @@ export function Dashboard() {
                       </div>
                     </div>
                     <div
-                      className={`px-2 py-1 rounded text-xs font-medium ${
-                        scan.status === "completed"
+                      className={`px-2 py-1 rounded text-xs font-medium ${scan.status === "completed"
                           ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
                           : scan.status === "running"
-                          ? "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200"
-                          : scan.status === "failed"
-                          ? "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
-                          : "bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200"
-                      }`}
+                            ? "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200"
+                            : scan.status === "failed"
+                              ? "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
+                              : "bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200"
+                        }`}
                     >
                       {scan.status}
                     </div>

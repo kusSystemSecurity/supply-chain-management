@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button"
 import { Loading } from "@/components/loading"
 import { ArrowLeft, AlertTriangle, CheckCircle, Clock, XCircle } from "lucide-react"
+import { CVEDetailsModal } from "@/components/cve-details-modal"
 import type { Scan, Vulnerability } from "@/types"
 
 export function ScanDetail() {
@@ -14,6 +15,8 @@ export function ScanDetail() {
   const [vulnerabilities, setVulnerabilities] = useState<Vulnerability[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [selectedVulnerability, setSelectedVulnerability] = useState<Vulnerability | null>(null)
+  const [isModalOpen, setIsModalOpen] = useState(false)
 
   useEffect(() => {
     const loadData = async () => {
@@ -164,7 +167,11 @@ export function ScanDetail() {
               {vulnerabilities.map((vuln) => (
                 <div
                   key={vuln.id}
-                  className="flex items-center justify-between p-4 border rounded-lg"
+                  onClick={() => {
+                    setSelectedVulnerability(vuln)
+                    setIsModalOpen(true)
+                  }}
+                  className="flex items-center justify-between p-4 border rounded-lg cursor-pointer hover:bg-accent transition-colors"
                 >
                   <div className="flex-1">
                     <div className="flex items-center space-x-2 mb-1">
@@ -200,6 +207,19 @@ export function ScanDetail() {
           )}
         </CardContent>
       </Card>
+
+      {selectedVulnerability && (
+        <CVEDetailsModal
+          cveId={selectedVulnerability.cve_id}
+          packageName={selectedVulnerability.package_name}
+          packageVersion={selectedVulnerability.package_version}
+          severity={selectedVulnerability.severity}
+          cvssScore={selectedVulnerability.cvss_score}
+          epssScore={selectedVulnerability.epss_score}
+          open={isModalOpen}
+          onOpenChange={setIsModalOpen}
+        />
+      )}
     </div>
   )
 }
