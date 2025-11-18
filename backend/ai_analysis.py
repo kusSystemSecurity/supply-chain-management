@@ -338,6 +338,81 @@ Output format:
         return None
 
 
+def _build_agent_dependency_graph() -> Dict[str, List[str]]:
+    """
+    Agent 의존성 그래프 정의
+    
+    Returns:
+        Dictionary mapping agent names to their dependencies
+        예: {'analyzer': ['parser'], 'red_team': ['analyzer'], ...}
+        
+    Note:
+        - 필수 의존성: 의존 Agent가 완료되어야 실행 가능
+        - 선택적 의존성: 의존 Agent가 없어도 실행 가능 (Reporter는 모든 결과를 수집하지만 독립 실행 가능)
+    """
+    return {
+        "parser": [],  # 완전 독립
+        "analyzer": ["parser"],  # Parser 결과 선호 (없으면 원본 데이터 사용 가능)
+        "red_team": ["analyzer"],  # Analyzer 결과 필요 (필수)
+        "blue_team": ["analyzer"],  # Analyzer 결과 필요 (필수)
+        "patcher": ["analyzer"],  # Analyzer 결과 필요 (필수)
+        "reporter": [],  # 완전 독립 (모든 결과 수집하지만 선택적 의존성)
+    }
+
+
+def _topological_sort_agents(
+    agents_to_run: List[str],
+    dependency_graph: Dict[str, List[str]]
+) -> List[List[str]]:
+    """
+    위상 정렬을 사용하여 Agent 실행 순서 결정
+    같은 레벨의 Agent들은 병렬 실행 가능
+    
+    Args:
+        agents_to_run: 실행할 Agent 목록
+        dependency_graph: Agent 의존성 그래프
+    
+    Returns:
+        레벨별로 그룹화된 Agent 목록 (각 레벨은 병렬 실행 가능)
+        예: [['parser'], ['analyzer'], ['red_team', 'blue_team', 'patcher'], ['reporter']]
+    """
+    # 실행할 Agent만 필터링
+    filtered_graph = {
+        agent: [dep for dep in deps if dep in agents_to_run]
+        for agent, deps in dependency_graph.items()
+        if agent in agents_to_run
+    }
+    
+    # 위상 정렬
+    in_degree = {agent: len(filtered_graph.get(agent, [])) for agent in agents_to_run}
+    levels = []
+    remaining = set(agents_to_run)
+    
+    while remaining:
+        # 현재 레벨: 의존성이 모두 해결된 Agent들
+        current_level = [
+            agent for agent in remaining
+            if in_degree.get(agent, 0) == 0
+        ]
+        
+        if not current_level:
+            # 순환 의존성 감지 (이론적으로 발생하지 않아야 함)
+            remaining_list = list(remaining)
+            levels.append(remaining_list)
+            break
+        
+        levels.append(current_level)
+        remaining -= set(current_level)
+        
+        # 의존성 업데이트
+        for agent in current_level:
+            for dependent in filtered_graph:
+                if agent in filtered_graph[dependent]:
+                    in_degree[dependent] = in_degree.get(dependent, 0) - 1
+    
+    return levels
+
+
 def run_ai_analysis(
     project_name: str, 
     selected_scan_ids: Optional[List[str]] = None,
@@ -357,6 +432,9 @@ def run_ai_analysis(
     각 Agent의 독립성:
     - 완전 독립: Parser, Reporter (다른 Agent 결과 불필요)
     - 조건부 독립: Red Team, Blue Team, Patcher (Analyzer 결과 필요)
+    
+    실행 순서는 의존성 그래프 기반으로 동적으로 결정됩니다.
+    같은 레벨의 Agent들은 병렬 실행 가능합니다.
     
     Args:
         project_name: Name of the project to analyze
@@ -419,6 +497,10 @@ def run_ai_analysis(
             "error": "No valid agents specified to run."
         }
 
+    # 의존성 그래프 기반으로 실행 순서 결정
+    dependency_graph = _build_agent_dependency_graph()
+    execution_levels = _topological_sort_agents(agents_to_run, dependency_graph)
+
     try:
         # Collect scan data for selected scans
         scan_data = collect_scan_data_for_analysis(project_name, selected_scan_ids)
@@ -451,127 +533,111 @@ def run_ai_analysis(
                 "patcher": None,
                 "reporter": None,
             },
-            "errors": {}
+            "errors": {},
+            "execution_order": [level for level in execution_levels]  # 실행 순서 기록
         }
 
-        # Phase 1: Parser Agent (완전 독립)
-        parser_result = None
-        if "parser" in agents_to_run:
-            try:
-                parser_prompt = f"""Parse and normalize the following Trivy scan results:
+        # Agent 실행 결과 저장용
+        agent_results = {}
+
+        # 레벨별로 Agent 실행 (같은 레벨은 병렬 실행 가능, 현재는 순차 실행)
+        for level_idx, level in enumerate(execution_levels):
+            for agent_name in level:
+                if agent_name not in agents_to_run:
+                    continue
+                
+                try:
+                    # 각 Agent별 실행 로직
+                    if agent_name == "parser":
+                        parser_prompt = f"""Parse and normalize the following Trivy scan results:
 
 {trivy_json}
 
 Extract normalized vulnerability data and calculate comprehensive statistics."""
-                
-                parser_result = agents["parser"].run(parser_prompt)
-                analysis_results["phases"]["parser"] = str(parser_result)
-            except Exception as e:
-                error_msg = f"Parser Agent error: {str(e)}"
-                analysis_results["errors"]["parser"] = error_msg
-                print(error_msg)
-                # Parser 실패해도 계속 진행 (다른 Agent는 독립적일 수 있음)
+                        
+                        result = agents["parser"].run(parser_prompt)
+                        agent_results["parser"] = str(result)
+                        analysis_results["phases"]["parser"] = str(result)
+                    
+                    elif agent_name == "analyzer":
+                        # Parser 결과가 있으면 사용, 없으면 원본 데이터 사용
+                        if agent_results.get("parser"):
+                            analyzer_input = f"""Analyze the following normalized vulnerability data:
 
-        # Phase 2: Analyzer Agent (Parser 결과 필요, 하지만 실패 시 원본 데이터 사용 가능)
-        analyzer_result = None
-        if "analyzer" in agents_to_run:
-            try:
-                # Parser 결과가 있으면 사용, 없으면 원본 데이터 사용
-                if parser_result:
-                    analyzer_input = f"""Analyze the following normalized vulnerability data:
-
-{str(parser_result)}
+{agent_results["parser"]}
 
 Reclassify vulnerabilities into P0/P1/P2/P3 priority levels and generate analysis report."""
-                else:
-                    # Parser 실패 시 원본 데이터로 분석 시도
-                    analyzer_input = f"""Analyze the following vulnerability scan data:
+                        else:
+                            # Parser 없이 실행하는 경우 원본 데이터 사용
+                            analyzer_input = f"""Analyze the following vulnerability scan data:
 
 {json.dumps(scan_data, indent=2, ensure_ascii=False)}
 
 Reclassify vulnerabilities into P0/P1/P2/P3 priority levels and generate analysis report."""
-                
-                analyzer_result = agents["analyzer"].run(analyzer_input)
-                analysis_results["phases"]["analyzer"] = str(analyzer_result)
-            except Exception as e:
-                error_msg = f"Analyzer Agent error: {str(e)}"
-                analysis_results["errors"]["analyzer"] = error_msg
-                print(error_msg)
-                # Analyzer 실패 시 Red Team, Blue Team, Patcher는 실행 불가
+                        
+                        result = agents["analyzer"].run(analyzer_input)
+                        agent_results["analyzer"] = str(result)
+                        analysis_results["phases"]["analyzer"] = str(result)
+                    
+                    elif agent_name == "red_team":
+                        # Analyzer 결과 확인
+                        if not agent_results.get("analyzer"):
+                            analysis_results["errors"]["red_team"] = "Skipped: Analyzer phase required but not completed"
+                            continue
+                        
+                        red_team_prompt = f"""Analyze the following P0/P1 high-priority vulnerabilities for exploitability:
 
-        # Phase 3: Red Team Agent (Analyzer 결과 필요, 조건부 독립)
-        if "red_team" in agents_to_run:
-            if analyzer_result:
-                try:
-                    # P0/P1 취약점만 추출하여 전달
-                    red_team_prompt = f"""Analyze the following P0/P1 high-priority vulnerabilities for exploitability:
-
-{str(analyzer_result)}
+{agent_results["analyzer"]}
 
 Focus only on P0 and P1 vulnerabilities. Verify exploit availability and provide attack scenarios."""
+                        
+                        result = agents["red_team"].run(red_team_prompt)
+                        agent_results["red_team"] = str(result)
+                        analysis_results["phases"]["red_team"] = str(result)
                     
-                    red_team_result = agents["red_team"].run(red_team_prompt)
-                    analysis_results["phases"]["red_team"] = str(red_team_result)
-                except Exception as e:
-                    error_msg = f"Red Team Agent error: {str(e)}"
-                    analysis_results["errors"]["red_team"] = error_msg
-                    print(error_msg)
-            else:
-                analysis_results["errors"]["red_team"] = "Skipped: Analyzer phase required but not completed"
+                    elif agent_name == "blue_team":
+                        # Analyzer 결과 확인
+                        if not agent_results.get("analyzer"):
+                            analysis_results["errors"]["blue_team"] = "Skipped: Analyzer phase required but not completed"
+                            continue
+                        
+                        blue_team_prompt = f"""Create defense strategies and detection rules based on the following vulnerability analysis:
 
-        # Phase 4: Blue Team Agent (Analyzer 결과 필요, 조건부 독립)
-        if "blue_team" in agents_to_run:
-            if analyzer_result:
-                try:
-                    # 전체 분석 결과 전달
-                    blue_team_prompt = f"""Create defense strategies and detection rules based on the following vulnerability analysis:
-
-{str(analyzer_result)}
+{agent_results["analyzer"]}
 
 Generate comprehensive defense strategies, detection rules, and monitoring recommendations."""
+                        
+                        result = agents["blue_team"].run(blue_team_prompt)
+                        agent_results["blue_team"] = str(result)
+                        analysis_results["phases"]["blue_team"] = str(result)
                     
-                    blue_team_result = agents["blue_team"].run(blue_team_prompt)
-                    analysis_results["phases"]["blue_team"] = str(blue_team_result)
-                except Exception as e:
-                    error_msg = f"Blue Team Agent error: {str(e)}"
-                    analysis_results["errors"]["blue_team"] = error_msg
-                    print(error_msg)
-            else:
-                analysis_results["errors"]["blue_team"] = "Skipped: Analyzer phase required but not completed"
+                    elif agent_name == "patcher":
+                        # Analyzer 결과 확인
+                        if not agent_results.get("analyzer"):
+                            analysis_results["errors"]["patcher"] = "Skipped: Analyzer phase required but not completed"
+                            continue
+                        
+                        patcher_prompt = f"""Generate patch scripts and remediation plans for patchable vulnerabilities:
 
-        # Phase 5: Patcher Agent (Analyzer 결과 필요, 조건부 독립)
-        if "patcher" in agents_to_run:
-            if analyzer_result:
-                try:
-                    # 패치 가능 취약점만 전달
-                    patcher_prompt = f"""Generate patch scripts and remediation plans for patchable vulnerabilities:
-
-{str(analyzer_result)}
+{agent_results["analyzer"]}
 
 Identify patchable vulnerabilities and create automated patch scripts with rollback procedures."""
+                        
+                        result = agents["patcher"].run(patcher_prompt)
+                        agent_results["patcher"] = str(result)
+                        analysis_results["phases"]["patcher"] = str(result)
                     
-                    patcher_result = agents["patcher"].run(patcher_prompt)
-                    analysis_results["phases"]["patcher"] = str(patcher_result)
-                except Exception as e:
-                    error_msg = f"Patcher Agent error: {str(e)}"
-                    analysis_results["errors"]["patcher"] = error_msg
-                    print(error_msg)
-            else:
-                analysis_results["errors"]["patcher"] = "Skipped: Analyzer phase required but not completed"
-
-        # Phase 6: Reporter Agent (완전 독립, 모든 Phase 결과 수집)
-        if "reporter" in agents_to_run:
-            try:
-                # 모든 Phase 결과를 종합
-                all_phases_data = {
-                    "parser": analysis_results["phases"]["parser"],
-                    "analyzer": analysis_results["phases"]["analyzer"],
-                    "red_team": analysis_results["phases"]["red_team"],
-                    "blue_team": analysis_results["phases"]["blue_team"],
-                    "patcher": analysis_results["phases"]["patcher"],
-                }
-                
-                reporter_prompt = f"""Generate comprehensive security reports from all analysis phases:
+                    elif agent_name == "reporter":
+                        # 모든 Phase 결과를 종합 (선택적 의존성)
+                        all_phases_data = {
+                            "parser": agent_results.get("parser"),
+                            "analyzer": agent_results.get("analyzer"),
+                            "red_team": agent_results.get("red_team"),
+                            "blue_team": agent_results.get("blue_team"),
+                            "patcher": agent_results.get("patcher"),
+                        }
+                        
+                        reporter_prompt = f"""Generate comprehensive security reports from all analysis phases:
 
 {json.dumps(all_phases_data, indent=2, ensure_ascii=False)}
 
@@ -580,13 +646,16 @@ Create 4 types of reports:
 2. Technical Deep Dive Report (Security Team)
 3. Remediation Action Plan (DevOps/Engineering)
 4. Compliance & Risk Report (Compliance Team)"""
+                        
+                        result = agents["reporter"].run(reporter_prompt)
+                        agent_results["reporter"] = str(result)
+                        analysis_results["phases"]["reporter"] = str(result)
                 
-                reporter_result = agents["reporter"].run(reporter_prompt)
-                analysis_results["phases"]["reporter"] = str(reporter_result)
-            except Exception as e:
-                error_msg = f"Reporter Agent error: {str(e)}"
-                analysis_results["errors"]["reporter"] = error_msg
-                print(error_msg)
+                except Exception as e:
+                    error_msg = f"{agent_name} Agent error: {str(e)}"
+                    analysis_results["errors"][agent_name] = error_msg
+                    print(error_msg)
+                    # 에러 발생해도 다음 Agent 계속 실행
 
         # Store analysis results
         ai_analyses_storage.append(analysis_results)
