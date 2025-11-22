@@ -1,3 +1,5 @@
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useState, useEffect } from "react"
 import { useProjects } from "@/hooks/useProjects"
 import { useScans } from "@/hooks/useScans"
@@ -422,9 +424,9 @@ export function AIAnalysisPage() {
               </CardHeader>
               <CardContent>
                 <div className="prose dark:prose-invert max-w-none">
-                  <pre className="whitespace-pre-wrap text-sm bg-muted p-4 rounded-md">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
                     {analysisResult[section.key] || "No analysis available"}
-                  </pre>
+                  </ReactMarkdown>
                 </div>
               </CardContent>
             </Card>

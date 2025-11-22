@@ -5,11 +5,20 @@ FastAPI application entry point
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-
+import os
+import agentops
 from .routers import scans, vulnerabilities, projects, ai_analysis, cve
 
 # Load environment variables
 load_dotenv()
+
+AGENTOPS_API_KEY = os.getenv("AGENTOPS_API_KEY")
+
+if AGENTOPS_API_KEY:
+    agentops.init(api_key=AGENTOPS_API_KEY)
+    print("AgentOps initialized")
+else:
+    print("AgentOps not initialized")
 
 # Create FastAPI app
 app = FastAPI(

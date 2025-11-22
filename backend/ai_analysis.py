@@ -8,11 +8,12 @@ import os
 import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-
-from agno.agent import Agent
-from agno.models.openrouter import OpenRouter
-from agno.workflow import Loop, Parallel, Step, Workflow
 from agno.workflow.types import StepInput, StepOutput
+from agno.workflow import Loop, Parallel, Step, Workflow
+from agno.db.sqlite import SqliteDb
+from agno.tools.duckduckgo import DuckDuckGoTools
+from agno.models.openrouter import OpenRouter
+from agno.agent import Agent
 
 # Handle imports based on execution context
 if __name__ == "__main__":
@@ -44,13 +45,6 @@ else:
 """
 AI analysis functions powered by the Agno multi-agent workflow runtime.
 """
-
-
-AGENTOPS_API_KEY = os.getenv("AGENTOPS_API_KEY")
-if AGENTOPS_API_KEY:
-    agentops.init(
-        api_key=AGENTOPS_API_KEY,
-    )
 
 
 def _to_float(value: Optional[str], default: float) -> float:
@@ -98,10 +92,40 @@ _workflow: Optional[Workflow] = None
 
 CONTEXTUALIZER_INSTRUCTIONS = """
 You are contextualizer_agent (contextual_summary stage) for a software supply-chain security program.
-Work off the JSON telemetry embedded in the user's message (bounded by <scan_data> tags).
-1. Normalize the telemetry into four sections: environment_overview, exposure_hotspots, exploit_signals, telemetry_gaps.
-2. Reference scan IDs, targets, and vulnerability counts where relevant.
-3. Highlight trends rather than restating raw data.
+Work off the Trivy scan telemetry embedded in the user's message (bounded by <scan_data> tags).
+
+Trivy scan data includes:
+- Vulnerabilities (CVEs) with CVSS scores (extract Base Score, Impact metrics C/I/A, Attack Vector, Complexity, User Interaction, Authentication)
+- EPSS scores (Exploit Prediction Scoring System) when available
+- Secret detection results (API keys, tokens, credentials)
+- License compliance issues
+- Misconfigurations (if scanned)
+- Package/dependency information with installed vs fixed versions
+
+**Extract for Risk Calculation**:
+For each CVE, collect the following if available:
+- CVSS v3.x Base Score and Vector String (parse AV, AC, PR, UI, S, C, I, A values)
+- CVSS Impact Sub-score (Confidentiality, Integrity, Availability impact)
+- EPSS score (0.0-1.0 probability)
+- Exploitation indicators: Public exploit availability, CISA KEV listing, exploit-db references
+- Vulnerability category/type: Code execution (RCE, SQLi, Command Injection), Memory corruption, DoS, Info disclosure, etc.
+- Exposure factors: 
+  * Number of affected products/images
+  * Internet-facing vs internal services
+  * Mentions in security advisories, blogs, social media
+  * Detection surface (remotely exploitable vs local)
+
+1. Normalize the telemetry into four sections:
+   - environment_overview: Scan targets (repos/images), total findings, severity distribution
+   - exposure_hotspots: Critical/High CVEs with rich context (CVSS, EPSS, exploit status, vulnerability type)
+   - exploit_signals: CVEs with public exploits, high EPSS (>0.4), in CISA KEV, high-risk categories (RCE/SQLi)
+   - telemetry_gaps: Missing EPSS data, incomplete CVSS vectors, unscanned assets
+
+2. Reference scan IDs, target identifiers (image:tag or repo path), and vulnerability counts by severity.
+3. Highlight actionable trends: fixable vs unfixable vulnerabilities, secret types, recurring vulnerable packages.
+4. Flag zero-day vulnerabilities (CVEs published within last 30 days) and secrets with high exposure risk.
+5. For each high-priority CVE, include a structured block with: CVE-ID, CVSS Base, CVSS Vector, EPSS, Vulnerability Type, Affected Products, Exposure Context
+
 Output markdown with the following section headers:
 ## Environment Overview
 ## Exposure Hotspots
@@ -111,63 +135,260 @@ Output markdown with the following section headers:
 
 PRIORITIZATION_INSTRUCTIONS = """
 You are prioritization_agent (prioritization_report stage).
-Input context contains the normalized summary from contextualizer_agent.
-Produce a backlog (max 10 items) sorted by risk_score (0-100) that teams can act on immediately.
+Input context contains the normalized Trivy scan summary from contextualizer_agent.
+
+**Risk Score Calculation Methodology**:
+Calculate Risk Score (1-25) = Impact Score (1-5) × Likelihood Score (1-5)
+
+**Impact Score (1-5)** - Based on CVSS Impact Metrics:
+Extract Confidentiality (C), Integrity (I), Availability (A) impact values from CVSS vector:
+- Score 5: All three (C/I/A) are HIGH
+- Score 4: Two HIGH impacts or one HIGH + two MEDIUM
+- Score 3: One HIGH or two MEDIUM impacts
+- Score 2: One MEDIUM impact
+- Score 1: Only LOW impacts
+(Adjust based on asset criticality: multiply by 1.2x for production systems, 0.8x for dev/test)
+
+**Likelihood Score (1-5)** - Multi-factor Assessment:
+Calculate a composite likelihood percentage (0-100%) first, then map to 1-5 scale:
+- 80-100% = Score 5 (Very High)
+- 60-79% = Score 4 (High)
+- 40-59% = Score 3 (Medium)
+- 20-39% = Score 2 (Low)
+- 0-19% = Score 1 (Very Low)
+
+**Likelihood Factors** (weighted combination):
+
+1. **EPSS Score** (Weight: HIGH - 30% contribution)
+   - EPSS ≥ 0.7: +30 points
+   - EPSS 0.4-0.69: +20 points
+   - EPSS 0.1-0.39: +10 points
+   - EPSS < 0.1: +5 points
+   - Missing EPSS: +5 points (assume low but not zero)
+   - NOTE: Low EPSS does NOT mean low risk; other factors compensate
+
+2. **Exploitation Evidence** (Weight: MEDIUM - 25% contribution)
+   - Public exploit exists (ExploitDB, Metasploit, GitHub PoCs): +25 points
+   - In CISA KEV catalog: +25 points
+   - Mentioned in exploit/threat intel sources: +15 points
+   - Weaponized malware campaigns: +25 points
+   - No exploitation evidence: +0 points
+
+3. **Vulnerability Type/Category** (Weight: VERY HIGH - 30% contribution)
+   - Remote Code Execution (RCE): +30 points
+   - SQL Injection / Command Injection: +30 points
+   - Authentication Bypass / Privilege Escalation: +25 points
+   - Memory Corruption (Buffer Overflow, Use-After-Free): +20 points
+   - Cross-Site Scripting (XSS) / CSRF: +15 points
+   - Information Disclosure: +10 points
+   - Denial of Service: +10 points
+   - Other/Unknown: +5 points
+
+4. **Exposure Context** (Weight: MEDIUM - 15% contribution)
+   - Affects multiple products/images (≥5): +10 points
+   - Affects 2-4 products: +7 points
+   - Single product: +3 points
+   - Internet-facing service: +5 points
+   - Remotely exploitable (AV:N in CVSS): +5 points
+   - Mentioned in 10+ sources (blogs, advisories, social): +10 points
+   - Mentioned in 3-9 sources: +5 points
+   - Mentioned in 1-2 sources: +2 points
+   - No mentions: +0 points
+
+5. **CVSS Exploitability Metrics** (Weight: INCLUDED in above, but verify)
+   - Attack Vector Network (AV:N): Already boosted by Exposure
+   - Low Attack Complexity (AC:L): Increases likelihood
+   - No Privileges Required (PR:N): Increases likelihood
+   - No User Interaction (UI:N): Increases likelihood
+   - (These are factored into CVSS Base Score but validate for edge cases)
+
+**Calculation Example**:
+CVE-2024-1234 in nginx:1.20
+- CVSS Vector: CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H (Score 9.8)
+- Impact: C:H, I:H, A:H → Impact Score = 5
+- EPSS: 0.85 → +30 (HIGH contribution)
+- Exploitation: Public exploit exists, in CISA KEV → +25 (MEDIUM contribution)
+- Vuln Type: RCE → +30 (VERY HIGH contribution)
+- Exposure: Affects 8 production images, internet-facing, mentioned in 15 sources → +10+5+5+10 = +30 (MEDIUM contribution)
+- **Likelihood %: 30+25+30+30 = 115% (capped at 100%) → Likelihood Score = 5**
+- **Risk Score = 5 × 5 = 25 (CRITICAL)**
+
+**Backlog Generation**:
+Produce a backlog (max 10 items) sorted by risk_score (1-25, highest first).
+
 For each backlog item include:
-- backlog_id (e.g., P1, P2)
-- title
-- risk_score (0-100)
-- rationale (why it matters)
-- suggested_owner (team or role)
-- next_action (tactical step for the next 7 days)
-Return markdown using a table or bullet list where each item is clearly delimited.
+- backlog_id (e.g., P1, P2, ...)
+- title (concise: "CVE-2024-XXXXX in package@version" or "Exposed AWS Secret Key")
+- risk_score (1-25): Calculated as Impact × Likelihood
+- impact_score (1-5): From CVSS C/I/A
+- likelihood_score (1-5): From multi-factor assessment
+- likelihood_breakdown: "EPSS:0.85(H), Exploit:Yes(M), Type:RCE(VH), Exposure:Multi-product+Internet(M)"
+- affected_assets: Specific images/repos/packages
+- severity: CRITICAL/HIGH/MEDIUM/LOW (from Trivy + Risk Score context)
+- rationale: Why it matters (exploit availability, data exposure, compliance impact, blast radius)
+- fix_available: YES/NO with version or workaround details
+- suggested_owner: Security/DevOps/AppTeam based on finding type
+- next_action: Tactical step for next 7 days (upgrade package, rotate secret, apply patch)
+
+**For Secret Exposures**:
+Risk Score calculation differs:
+- Impact Score: Based on credential privilege level (5=Admin/Root, 4=DB/API, 3=Service, 2=ReadOnly, 1=Public)
+- Likelihood Score: Based on exposure context (5=Public repo + Production, 4=Public repo, 3=Private repo + Prod, 2=Private repo, 1=Dev only)
+
+Return markdown table format:
+| ID | Title | Risk | Impact | Likelihood | Likelihood Factors | Affected Assets | Fix | Owner | Next Action |
+
+Add a summary paragraph highlighting:
+- Total items by risk tier (20-25=Critical, 15-19=High, 10-14=Medium, 5-9=Low, 1-4=Info)
+- Most common vulnerability types in backlog
+- Average EPSS for top 5 items
 """.strip()
 
 SUPPLY_CHAIN_INSTRUCTIONS = """
 You are supply_chain_agent (supply_chain_report stage).
 Use the prioritized backlog provided in the previous step.
-For each backlog_id, map:
-- upstream_dependencies and downstream_dependencies that expand blast radius,
-- potential blast_radius narrative,
-- existing_controls and proposed_controls for each dependency path.
-Return markdown with a section per backlog_id titled `## Backlog ID - <id>`.
-Keep the analysis concise but specific enough for partner teams to reason about impact.
+
+For each backlog_id (focus on Risk Score ≥ 15), analyze:
+- upstream_dependencies: Direct and transitive dependencies introducing the vulnerability
+- downstream_dependencies: Services/images consuming the affected component
+- blast_radius: Number of images/services affected, criticality of impacted systems
+- **risk_propagation**: How risk score compounds through dependency chain
+  * If parent image has Risk=20 and 5 child images inherit it, aggregate exposure is critical
+  * Calculate: Individual Risk × Number of Affected Assets × Asset Criticality Multiplier
+- propagation_path: How vulnerability travels (base image → derived images → services)
+- existing_controls: Current mitigations (WAF rules, network segmentation, runtime detection)
+- proposed_controls: Additional safeguards (version pinning, image signing, secret rotation policies)
+
+For secret exposures, identify:
+- Secret scope: Which systems can be accessed with exposed credentials
+- Rotation status: Last rotated date (if available), rotation policy compliance
+- Detection coverage: Monitored in SIEM/alerting systems
+
+**Risk Amplification Analysis**:
+For high-risk items (Risk ≥ 20), explain how likelihood factors compound:
+- "CVE-2024-1234 has EPSS 0.9 (exploitation imminent) + public exploit + RCE type + affects 12 internet-facing services = Risk 25"
+- "Exposure across multiple products increases attack surface, raising effective likelihood"
+
+Return markdown with a section per backlog_id titled `## Backlog ID - <id> (Risk: X/25)`.
+Include a dependency tree visualization (text-based) for critical items.
 """.strip()
 
 REMEDIATION_INSTRUCTIONS = """
 You are remediation_agent (remediation_plan stage).
-You receive synthesized insight that blends prioritization and supply-chain context.
+You receive synthesized insight blending prioritization and supply-chain context from Trivy scans.
+
 Produce three sections:
-1. Quick Wins (can ship within 2 weeks) referencing backlog IDs.
-2. Strategic Fixes (multi-quarter initiatives) referencing backlog IDs.
-3. Compensating Controls for any residual risk.
-Each recommendation must include owner/timebox hints (team + timeframe) and measurable success criteria.
+
+1. **Quick Wins** (ship within 2 weeks):
+   - Package upgrades with available patches (specify version: pkg@1.2.3 → pkg@1.2.4)
+   - Secret rotation/revocation with specific credential types
+   - Base image updates (FROM alpine:3.18 → alpine:3.19)
+   - Reference backlog IDs, include exact commands/Dockerfile changes
+
+2. **Strategic Fixes** (multi-quarter initiatives):
+   - Dependency refactoring (remove vulnerable libraries)
+   - Architecture changes (isolate high-risk components)
+   - Policy enforcement (automated secret scanning in CI/CD)
+   - Reference backlog IDs with milestone breakdown
+
+3. **Compensating Controls** (for unfixable/accepted risks):
+   - Runtime protection (WAF rules, RASP)
+   - Network controls (firewall rules, segmentation)
+   - Monitoring/alerting enhancements
+   - Acceptance criteria for residual risk
+
+Each recommendation must include:
+- Owner: Specific team (Platform/Security/App Team X)
+- Timeframe: Specific dates or sprint numbers
+- Success criteria: Measurable outcomes (zero CRITICAL CVEs, all secrets rotated, scan results green)
+- Validation: How to verify (re-scan with Trivy, penetration test, audit log review)
 """.strip()
 
 QA_REVIEW_INSTRUCTIONS = f"""
 You are qa_review_agent (qa_review stage) ensuring the remediation plan is shippable.
-Evaluate completeness, assumptions, and evidence quality.
-Respond with VALID JSON only (no markdown) using this schema:
+Evaluate completeness against Trivy scan characteristics and risk scoring methodology:
+
+**Risk Score Validation Checklist**:
+- All Risk Score ≥ 20 items have immediate remediation actions (within 48-72 hours)
+- Risk Score 15-19 items have remediation plans (within 1-2 weeks)
+- Impact and Likelihood scores are justified with specific factors (CVSS, EPSS, exploit status, vuln type, exposure)
+- Likelihood breakdown includes all relevant factors (not just EPSS or CVSS alone)
+- High EPSS (>0.7) items are prioritized even if CVSS is moderate
+- RCE/SQLi vulnerabilities are in top 5 regardless of EPSS
+- Multi-product exposures have coordinated remediation plans
+- Secret exposures with Impact ≥ 4 have rotation/revocation within 24 hours
+
+**Verification Checklist**:
+- All CRITICAL/HIGH risk findings (Risk ≥ 15) have remediation actions
+- Secret exposures have rotation/revocation plans with timelines
+- Fixable vulnerabilities specify exact package version upgrades
+- Unfixable vulnerabilities have compensating controls with risk acceptance documentation
+- Base image updates are tested for compatibility
+- Re-scan validation steps are documented
+
+Respond with VALID JSON only (no markdown):
 {{
-  "gaps": ["Describe concrete missing elements"],
-  "assumptions": ["List key assumptions the plan made"],
-  "verification_steps": ["List how to verify remediation success"],
+  "gaps": ["Concrete missing elements like 'CVE-2024-XXXX (Risk:25) has no immediate action plan'"],
+  "assumptions": ["e.g., 'Assumes EPSS score will remain stable', 'Assumes no 0-day exploit emergence'"],
+  "verification_steps": ["e.g., 'Re-run trivy scan to confirm Risk Score drops below 15', 'Verify EPSS monitoring for top 5 CVEs'"],
+  "risk_score_concerns": ["Items where calculated risk may be under/overestimated"],
+  "trivy_coverage": ["Images/repos requiring additional scanning"],
+  "false_positive_risk": ["Findings that may need manual verification"],
   "feedback_summary": "One paragraph summary",
   "confidence": 0.0,
   "should_continue": true
 }}
-Confidence must be a float between 0 and 1. Set should_continue to false when confidence ≥ {AI_ANALYSIS_QA_TARGET_CONFIDENCE:.2f}
-or no additional remediation changes are required.
+Confidence: 0-1 float. Set should_continue=false when confidence ≥ {AI_ANALYSIS_QA_TARGET_CONFIDENCE:.2f}.
 """.strip()
 
 EXECUTIVE_SUMMARY_INSTRUCTIONS = """
 You are executive_summary_agent (executive_summary stage).
-Create a stakeholder-ready narrative that references:
-- Key backlog items and their expected blast radius reduction.
-- Expected risk reduction percentage.
-- High-risk assets affected.
-- Remediation velocity signal (slow/steady/fast) with rationale.
-Conclude with a KPI table covering: exposure_count, high_risk_assets, expected_risk_reduction, remediation_velocity_signal.
+Create a stakeholder-ready narrative referencing Trivy scan results, risk scoring, and remediation plans:
+
+**Executive Narrative** (2-3 paragraphs):
+- Current risk posture: Total vulnerabilities by risk tier (Critical 20-25, High 15-19, Medium 10-14, Low 5-9)
+- Key backlog items with risk scores and likelihood drivers (EPSS, exploitation, vulnerability type, exposure)
+- Expected risk reduction: Percentage drop in high-risk findings (Risk ≥ 15) after remediation
+- High-risk assets: Production images, public-facing services with Risk ≥ 20
+- Remediation velocity signal: 
+  * fast (>80% of Risk ≥15 items fixable in 2 weeks) 
+  * steady (50-80%) 
+  * slow (<50%, requires strategic fixes)
+
+**KPI Dashboard Table**:
+| Metric | Current | Post-Remediation | Change |
+|--------|---------|------------------|--------|
+| Risk Score 20-25 (Critical) | X | Y | -Z% |
+| Risk Score 15-19 (High) | X | Y | -Z% |
+| Average Risk Score (Top 10) | X.X | Y.Y | -Z.Z |
+| High EPSS (>0.7) CVEs | X | Y | -Z% |
+| RCE/SQLi Vulnerabilities | X | Y | -Z% |
+| Exposed Secrets (Impact ≥4) | X | Y | -Z% |
+| Internet-Facing Exposures | X | Y | -Z% |
+| Mean Time to Remediate (MTTR) | X days | Target: Y days | - |
+
+**Risk Heatmap** (text representation by Likelihood × Impact):
+```
+Impact ↑
+  5 |  [P1]  [P2]        [P3]
+  4 |        [P4]  [P5]
+  3 |              [P6]  [P7]
+  2 |                    [P8]
+  1 |                          [P9]
+    +---------------------------→ Likelihood
+      1     2     3     4     5
+```
+- CRITICAL (Risk 20-25): [List top 3 with CVE-ID, EPSS, Vuln Type, Affected Assets]
+- HIGH (Risk 15-19): [Summary count + common factors]
+- Compliance: [License issues, policy violations from Trivy]
+
+**Likelihood Factor Summary**:
+- X% of high-risk items have public exploits
+- Average EPSS for Critical tier: 0.XX
+- Y items are RCE/SQLi (inherently high-risk categories)
+- Z items affect multiple products, amplifying exposure
+
+Conclude with a timeline Gantt chart (text-based) showing quick wins vs strategic fixes, sorted by risk score.
 """.strip()
 
 
@@ -181,7 +402,7 @@ def _build_model() -> OpenRouter:
     )
 
 
-def _build_agent(name: str, description: str, instructions: str) -> Agent:
+def _build_agent(name: str, description: str, instructions: str, tools: Optional[List[Any]] = None) -> Agent:
     """
     Convenience helper to instantiate Agno agents with consistent defaults.
     """
@@ -190,8 +411,9 @@ def _build_agent(name: str, description: str, instructions: str) -> Agent:
         description=description,
         model=_build_model(),
         instructions=instructions,
-        markdown=True,
+        tools=tools if tools else [],
         add_datetime_to_context=True,
+        markdown=True,
     )
 
 
@@ -336,6 +558,7 @@ def initialize_ai_agents() -> Workflow:
         name=_CONTEXTUALIZER_STEP_NAME,
         description="Normalizes raw telemetry into a structured context packet.",
         instructions=CONTEXTUALIZER_INSTRUCTIONS,
+        tools=[DuckDuckGoTools()],
     )
     prioritization_agent = _build_agent(
         name=_PRIORITIZATION_STEP_NAME,
@@ -361,6 +584,7 @@ def initialize_ai_agents() -> Workflow:
         name=_EXEC_SUMMARY_STEP_NAME,
         description="Translates the workflow output into an executive-ready narrative.",
         instructions=EXECUTIVE_SUMMARY_INSTRUCTIONS,
+        tools=[DuckDuckGoTools()],
     )
 
     _workflow = Workflow(
