@@ -53,6 +53,9 @@ export function Dashboard() {
     { name: "Pending", value: scans.filter((s) => s.status === "pending").length },
     { name: "Failed", value: scans.filter((s) => s.status === "failed").length },
   ].filter((item) => item.value > 0)
+  const maxStatusValue = statusData.reduce((max, item) => Math.max(max, item.value), 0)
+  const statusAxisMax = Math.max(maxStatusValue, 1)
+  const statusTicks = Array.from({ length: statusAxisMax + 1 }, (_, i) => i)
 
   return (
     <div className="space-y-6">
@@ -178,15 +181,20 @@ export function Dashboard() {
                 }}
                 className="h-[300px] w-full"
               >
-                <BarChart data={statusData}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <BarChart data={statusData} layout="vertical">
+                  <CartesianGrid strokeDasharray="3 3" horizontal={false} />
                   <XAxis
-                    dataKey="name"
+                    type="number"
+                    domain={[0, statusAxisMax]}
+                    ticks={statusTicks}
+                    allowDecimals={false}
                     tickLine={false}
                     axisLine={false}
                     tickMargin={8}
                   />
                   <YAxis
+                    dataKey="name"
+                    type="category"
                     tickLine={false}
                     axisLine={false}
                     tickMargin={8}

@@ -12,6 +12,51 @@ import { Loading } from "@/components/loading"
 import { Brain, Plus, Play, RefreshCw, AlertCircle, Link as LinkIcon, CheckCircle2 } from "lucide-react"
 import type { Scan, AIAnalysis } from "@/types"
 
+type AnalysisSectionKey =
+  | "contextual_summary"
+  | "prioritization"
+  | "supply_chain"
+  | "remediation"
+  | "executive_summary"
+  | "qa_review"
+
+const ANALYSIS_SECTIONS: Array<{
+  key: AnalysisSectionKey
+  title: string
+  description: string
+}> = [
+    {
+      key: "contextual_summary",
+      title: "Contextual Summary",
+      description: "Normalized telemetry from contextualizer agent",
+    },
+    {
+      key: "prioritization",
+      title: "Prioritization Analysis",
+      description: "Vulnerability prioritization recommendations",
+    },
+    {
+      key: "supply_chain",
+      title: "Supply Chain Analysis",
+      description: "Supply chain security impact assessment",
+    },
+    {
+      key: "remediation",
+      title: "Remediation Guidance",
+      description: "Actionable remediation steps",
+    },
+    {
+      key: "executive_summary",
+      title: "Executive Summary",
+      description: "Stakeholder narrative and KPIs",
+    },
+    {
+      key: "qa_review",
+      title: "QA Review",
+      description: "Loop feedback plus verification guidance",
+    },
+  ]
+
 export function AIAnalysisPage() {
   const { projects, refetch: refetchProjects } = useProjects()
   const { scans, refetch: refetchScans } = useScans()
@@ -30,6 +75,15 @@ export function AIAnalysisPage() {
   const [assigningScans, setAssigningScans] = useState(false)
   const [assignSuccess, setAssignSuccess] = useState<string | null>(null)
   const [assignError, setAssignError] = useState<string | null>(null)
+  const qaConfidenceText =
+    analysisResult && typeof analysisResult.qa_confidence === "number"
+      ? `${(analysisResult.qa_confidence * 100).toFixed(1)}%`
+      : "Not scored"
+  const hasQaMetadata =
+    !!analysisResult &&
+    (((analysisResult.qa_confidence ?? null) !== null) ||
+      ((analysisResult.qa_iterations ?? null) !== null) ||
+      Boolean(analysisResult.workflow_run_id))
 
   // Load scans when project is selected
   useEffect(() => {
@@ -206,9 +260,8 @@ export function AIAnalysisPage() {
                       const isAlreadyAssigned = scan.project_name === assignProjectName
                       return {
                         value: scan.id,
-                        label: `${scan.target} (${scan.vulnerability_count} vulnerabilities) ${
-                          isAlreadyAssigned ? "✓ Already assigned" : ""
-                        }`,
+                        label: `${scan.target} (${scan.vulnerability_count} vulnerabilities) ${isAlreadyAssigned ? "✓ Already assigned" : ""
+                          }`,
                       }
                     })}
                     value={selectedScansToAssign}
@@ -337,47 +390,45 @@ export function AIAnalysisPage() {
       {/* Analysis Results */}
       {analysisResult && (
         <div className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Prioritization Analysis</CardTitle>
-              <CardDescription>Vulnerability prioritization recommendations</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="prose dark:prose-invert max-w-none">
-                <pre className="whitespace-pre-wrap text-sm bg-muted p-4 rounded-md">
-                  {analysisResult.prioritization || "No analysis available"}
-                </pre>
-              </div>
-            </CardContent>
-          </Card>
+          {hasQaMetadata && (
+            <Card>
+              <CardHeader>
+                <CardTitle>QA Loop Metrics</CardTitle>
+                <CardDescription>Confidence gating details for remediation loop</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-1 text-sm">
+                <p>
+                  <span className="font-semibold">Confidence:</span> {qaConfidenceText}
+                </p>
+                <p>
+                  <span className="font-semibold">Iterations:</span>{" "}
+                  {analysisResult.qa_iterations ?? "N/A"}
+                </p>
+                {analysisResult.workflow_run_id && (
+                  <p>
+                    <span className="font-semibold">Workflow Run ID:</span>{" "}
+                    {analysisResult.workflow_run_id}
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          )}
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Supply Chain Analysis</CardTitle>
-              <CardDescription>Supply chain security impact assessment</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="prose dark:prose-invert max-w-none">
-                <pre className="whitespace-pre-wrap text-sm bg-muted p-4 rounded-md">
-                  {analysisResult.supply_chain || "No analysis available"}
-                </pre>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Remediation Guidance</CardTitle>
-              <CardDescription>Actionable remediation steps</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="prose dark:prose-invert max-w-none">
-                <pre className="whitespace-pre-wrap text-sm bg-muted p-4 rounded-md">
-                  {analysisResult.remediation || "No analysis available"}
-                </pre>
-              </div>
-            </CardContent>
-          </Card>
+          {ANALYSIS_SECTIONS.map((section) => (
+            <Card key={section.key}>
+              <CardHeader>
+                <CardTitle>{section.title}</CardTitle>
+                <CardDescription>{section.description}</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="prose dark:prose-invert max-w-none">
+                  <pre className="whitespace-pre-wrap text-sm bg-muted p-4 rounded-md">
+                    {analysisResult[section.key] || "No analysis available"}
+                  </pre>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
         </div>
       )}
     </div>

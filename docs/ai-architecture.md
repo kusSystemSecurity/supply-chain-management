@@ -1,75 +1,68 @@
-# AI Analysis Architecture (Archived)
+# AI Analysis Architecture (Agno Runtime)
 
-This document preserves the structure of the retired Google ADK-based AI
-analysis workflow that previously lived in `backend/ai_analysis.py`. The code
-has been removed for compliance reasons, but the design is kept here for
-reference in case the capability is revisited.
+The current AI analysis pipeline is implemented with the [Agno](https://www.agno.com/)
+workflow runtime (`agno==2.2.13`). The workflow lives in `backend/ai_analysis.py`
+and is orchestrated through a single cached `Workflow` instance constructed by
+`initialize_ai_agents()`.
 
 ## Workflow Topology
-- **Contextualizer → Insight Parallel → Remediation Loop → Executive Summary**  
-  A `SequentialAgent` (`cybersecurity_pipeline`) enforced the stage order.
-- **Insight Parallel** fanned out `prioritization_agent` and
-  `supply_chain_agent` concurrently via a `ParallelAgent`.
-- **Remediation Loop** wrapped `remediation_agent` and `qa_review_agent` inside a
-  `LoopAgent` capped at two iterations or until QA confidence exceeded the
-  configured threshold.
+- **Contextualizer → Insight Parallel → Insight Synthesizer → Remediation Loop → Executive Summary**
+  - A `Workflow` enforces the stage order.
+  - **Insight Parallel** fans out `prioritization_agent` and `supply_chain_agent`
+    concurrently via a `Parallel` node.
+  - **Insight Synthesizer** is a custom Python step that merges the parallel outputs
+    into a consolidated packet for the remediation loop.
+  - **Remediation Loop** wraps `remediation_agent` and `qa_review_agent` inside an
+    Agno `Loop` capped by `AI_ANALYSIS_MAX_REMEDIATION_ITERATIONS` or until QA
+    confidence meets `AI_ANALYSIS_QA_TARGET_CONFIDENCE`.
 
 ## Agent Catalog
-- **contextualizer_agent** (`contextual_summary`): normalized scan telemetry into
-  `environment_overview`, `exposure_hotspots`, `exploit_signals`,
-  `telemetry_gaps`. Could call Google Search when available.
-- **prioritization_agent** (`prioritization_report`): produced a backlog of up to
-  10 ranked items with risk scores, owners, and near-term actions.
-- **supply_chain_agent** (`supply_chain_report`): mapped upstream/downstream
-  dependencies, blast radius, and controls for each prioritized risk.
-- **remediation_agent** (`remediation_plan`): emitted quick wins, strategic
-  fixes, and compensating controls tied back to backlog IDs plus owner/timebox
-  hints.
-- **qa_review_agent** (`qa_review`): generated JSON describing gaps, assumptions,
-  verification steps, and a `confidence` value from 0-1 which gated the loop.
-- **executive_summary_agent** (`executive_summary`): produced the stakeholder
-  narrative and KPI scoreboard (exposure_count, high_risk_assets,
-  expected_risk_reduction, remediation_velocity_signal).
+- **contextualizer_agent** (`contextual_summary`): normalizes raw telemetry into
+  `environment_overview`, `exposure_hotspots`, `exploit_signals`, `telemetry_gaps`.
+- **prioritization_agent** (`prioritization_report`): emits up to ten backlog
+  items with risk scores, suggested owners, and next actions.
+- **supply_chain_agent** (`supply_chain_report`): maps upstream/downstream
+  dependencies, blast radius, and current/proposed controls per backlog item.
+- **insight_synthesizer** (custom function step): merges prioritization and
+  supply-chain findings into a single markdown packet for downstream agents.
+- **remediation_agent** (`remediation_plan`): produces quick wins, strategic fixes,
+  and compensating controls tied to backlog IDs plus owner/timebox hints.
+- **qa_review_agent** (`qa_review`): outputs JSON describing gaps, assumptions,
+  verification steps, `confidence` (0-1), and `should_continue` flag which gates the loop.
+- **executive_summary_agent** (`executive_summary`): produces the stakeholder narrative
+  and KPI scoreboard (`exposure_count`, `high_risk_assets`, `expected_risk_reduction`,
+  `remediation_velocity_signal`).
 
 ## State & Dependency Model
-- Agent state keys were defined in `AGENT_STATE_KEY_BY_NAME`; downstream agents
-  waited on required keys listed in `AGENT_DEPENDENCIES`.
-- Shared state also held `qa_confidence`, `qa_target_confidence`,
-  `remediation_iteration`, and the JSON-serialized scan bundle.
-- `_wait_for_dependencies` polled the shared state with a 30-second timeout to
-  sequence agents executed in parallel.
+- Agno automatically threads `StepInput.previous_step_outputs`. The contextualizer
+  provides the base input; parallel steps read the contextual summary; the synthesizer
+  emits the combined packet consumed by the loop.
+- Shared metadata persisted with the result:
+  - `scan_metadata` and `scan_data_json`
+  - `workflow_run_id`
+  - `qa_confidence` and `qa_iterations`
+- QA loop termination occurs when either `confidence >= AI_ANALYSIS_QA_TARGET_CONFIDENCE`
+  or the QA agent explicitly sets `should_continue` to `false`.
 
 ## Data Inputs
-- `collect_scan_data_for_analysis(project_name, selected_scan_ids)` aggregated
-  per-scan metadata (type, target, counts, CVE details).
-- This bundle was normalized to UTF-8 JSON (`data_json`) and injected into every
-  prompt builder for deterministic context.
-- `scan_overview` (dict) plus project metadata were also part of the shared
-  state so downstream agents could reason over aggregated metrics.
+- `collect_scan_data_for_analysis(project_name, selected_scan_ids)` aggregates per-scan
+  metadata (type, target, counts, CVE details).
+- The bundle is serialized to UTF-8 JSON (`scan_data_json`) and injected into the
+  workflow input. Every agent receives the same `<scan_data>...</scan_data>` block.
 
 ## Configuration Checklist
-- `OPENROUTER_API_KEY`: required for LiteLlm access through OpenRouter.
-- `OPENROUTER_API_BASE`: defaulted to `https://openrouter.ai/api/v1`.
-- `AI_ANALYSIS_MODEL`: defaulted to `openrouter/deepseek/deepseek-r1:free`.
-- `AI_ANALYSIS_QA_TARGET_CONFIDENCE`: float, default `0.85`, used to terminate
-  the remediation loop early when QA feedback was satisfactory.
-- Optional `AGENTOPS_API_KEY` enabled usage tracing via AgentOps.
+- `OPENROUTER_API_KEY`: required for calling OpenRouter-hosted models through Agno.
+- `AI_ANALYSIS_MODEL` (default `openrouter/deepseek/deepseek-r1:free`).
+- `AI_ANALYSIS_MODEL_MAX_TOKENS` (default `3200`).
+- `AI_ANALYSIS_QA_TARGET_CONFIDENCE` (default `0.85`).
+- `AI_ANALYSIS_MAX_REMEDIATION_ITERATIONS` (default `2`).
+- Optional `AGENTOPS_API_KEY` enables usage tracing via AgentOps.
 
 ## Execution Lifecycle
-1. Validate the project and gather the selected scans.
-2. Initialize agents (`initialize_ai_agents`) and compose the workflow (sequential,
-   parallel, loop nodes) when Google ADK was available.
-3. Build prompts per agent via `PROMPT_BUILDERS` using the shared state.
-4. Walk the pipeline with `_run_workflow_pipeline`, mutating the shared state as
-   each agent completed.
-5. Persist the final composite result to `ai_analyses_storage` and return it
-   through `run_ai_analysis`.
-
-## Decommissioning Notes
-- The runtime integration has been removed from `backend/ai_analysis.py`; the
-  module now only exposes stubs that always return a deterministic error.
-- API consumers should surface the stub message or guard the endpoints until a
-  replacement strategy is defined.
-- When/if reinstated, start from the architecture described above or import the
-  archived prompts directly from version control history.
+1. Validate the project and selected scan IDs.
+2. Collect scan metadata and render deterministic JSON context.
+3. Lazily initialize the Agno workflow (`initialize_ai_agents`).
+4. Run the workflow with `_build_analysis_prompt`, capturing `step_results`.
+5. Extract section outputs plus QA metadata and persist to `ai_analyses_storage`.
+6. Surface results through the FastAPI endpoints and the React AI Analysis view.
 

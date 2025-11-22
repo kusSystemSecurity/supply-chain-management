@@ -61,9 +61,18 @@ export interface AssignScanRequest {
 export interface AIAnalysis {
   project_name: string
   analyzed_at: string
-  prioritization: string | null
-  supply_chain: string | null
-  remediation: string | null
+  scans?: Record<string, any>[] | null
+  scan_metadata?: Record<string, any> | null
+  scan_data_json?: string | null
+  workflow_run_id?: string | null
+  contextual_summary?: string | null
+  prioritization?: string | null
+  supply_chain?: string | null
+  remediation?: string | null
+  qa_review?: string | null
+  qa_confidence?: number | null
+  qa_iterations?: number | null
+  executive_summary?: string | null
 }
 
 export interface AIAnalysisRequest {

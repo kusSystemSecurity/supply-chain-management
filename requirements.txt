@@ -1,4 +1,5 @@
 agentlightning==0.2.2
+agno==2.2.13
 agentops==0.4.21
 aiofiles==24.1.0
 aiohappyeyeballs==2.6.1
