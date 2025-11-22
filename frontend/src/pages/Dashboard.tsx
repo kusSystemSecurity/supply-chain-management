@@ -52,10 +52,11 @@ export function Dashboard() {
     { name: "Running", value: scans.filter((s) => s.status === "running").length },
     { name: "Pending", value: scans.filter((s) => s.status === "pending").length },
     { name: "Failed", value: scans.filter((s) => s.status === "failed").length },
-  ].filter((item) => item.value > 0)
+  ]
   const maxStatusValue = statusData.reduce((max, item) => Math.max(max, item.value), 0)
   const statusAxisMax = Math.max(maxStatusValue, 1)
-  const statusTicks = Array.from({ length: statusAxisMax + 1 }, (_, i) => i)
+  const statusTicks =
+    maxStatusValue === 0 ? [0] : Array.from({ length: statusAxisMax + 1 }, (_, i) => i)
 
   return (
     <div className="space-y-6">
@@ -249,12 +250,12 @@ export function Dashboard() {
                     </div>
                     <div
                       className={`px-2 py-1 rounded text-xs font-medium ${scan.status === "completed"
-                          ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
-                          : scan.status === "running"
-                            ? "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200"
-                            : scan.status === "failed"
-                              ? "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
-                              : "bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200"
+                        ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+                        : scan.status === "running"
+                          ? "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200"
+                          : scan.status === "failed"
+                            ? "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
+                            : "bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200"
                         }`}
                     >
                       {scan.status}
