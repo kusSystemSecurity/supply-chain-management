@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import os
 import agentops
-from .routers import scans, vulnerabilities, projects, ai_analysis, cve
+from .routers import scans, vulnerabilities, projects, ai_analysis, cve, chat
 
 # Load environment variables
 load_dotenv()
@@ -45,6 +45,7 @@ app.include_router(projects.router, prefix="/api/projects", tags=["projects"])
 app.include_router(ai_analysis.router,
                    prefix="/api/ai-analysis", tags=["ai-analysis"])
 app.include_router(cve.router, prefix="/api/cve", tags=["cve"])
+app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 
 
 @app.get("/")
