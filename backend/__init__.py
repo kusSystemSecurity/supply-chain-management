@@ -33,7 +33,10 @@ from .projects import (
 from .data_collection import collect_scan_data_for_analysis
 from .ai_analysis import (
     initialize_ai_agents,
+    initialize_agent_os,
+    get_agent_os_app,
     run_ai_analysis,
+    serve_agent_os,
     get_ai_analyses_by_project,
 )
 
@@ -71,7 +74,10 @@ __all__ = [
     "collect_scan_data_for_analysis",
     # AI Analysis
     "initialize_ai_agents",
+    "initialize_agent_os",
+    "get_agent_os_app",
     "run_ai_analysis",
+    "serve_agent_os",
     "get_ai_analyses_by_project",
 ]
 

@@ -42,6 +42,19 @@ AI-powered software supply chain security analysis platform with comprehensive v
 
 ## Setup
 
+### Database Setup
+
+#### Using Docker
+```bash
+docker run -d \
+  --name agno-postgres \
+  -e POSTGRES_DB=ai \
+  -e POSTGRES_USER=ai \
+  -e POSTGRES_PASSWORD=ai \
+  -p 5532:5432 \
+  pgvector/pgvector:pg17
+```
+
 ### Backend Setup
 
 1. Install Python dependencies:

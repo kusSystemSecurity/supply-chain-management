@@ -1,18 +1,45 @@
 """
-AI analysis functions using Cybersecurity AI (CAI) framework
+AI analysis functions using Agno multi-agent workflow runtime.
 """
 
 import json
 import os
 import sys
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from agno.workflow.types import StepInput, StepOutput
 from agno.workflow import Loop, Parallel, Step, Workflow
-from agno.db.sqlite import PostgresDb
+from agno.os import AgentOS
+from agno.db.postgres import PostgresDb
+from agno.vectordb.pgvector import PgVector
+from agno.knowledge.knowledge import Knowledge
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.models.openrouter import OpenRouter
 from agno.agent import Agent
+
+from dotenv import load_dotenv
+
+# Database connection
+db_url = "postgresql+psycopg://ai:ai@localhost:5532/ai"
+
+# Create Postgres-backed memory store
+db = PostgresDb(db_url=db_url)
+
+# Create Postgres-backed vector store
+vector_db = PgVector(
+    db_url=db_url,
+    table_name="agno_docs",
+)
+knowledge = Knowledge(
+    name="Agno Docs",
+    contents_db=db,
+    vector_db=vector_db,
+)
+
+load_dotenv()
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
 # Handle imports based on execution context
 if __name__ == "__main__":
@@ -87,7 +114,10 @@ _QA_STEP_NAME = "QA Review Agent"
 _REMEDIATION_LOOP_NAME = "Remediation Loop"
 _EXEC_SUMMARY_STEP_NAME = "Executive Summary Agent"
 
+_agent_registry: Optional[Dict[str, Agent]] = None
 _workflow: Optional[Workflow] = None
+_agent_os: Optional[AgentOS] = None
+_agent_os_app: Optional["FastAPI"] = None
 
 CONTEXTUALIZER_INSTRUCTIONS = """
 You are contextualizer_agent (contextual_summary stage) for a software supply-chain security program.
@@ -412,9 +442,58 @@ def _build_agent(name: str, description: str, instructions: str, tools: Optional
         model=_build_model(),
         instructions=instructions,
         tools=tools if tools else [],
+        knowledge=knowledge,
+        db=db,
+        enable_user_memories=True,
         add_datetime_to_context=True,
         markdown=True,
     )
+
+
+def _get_agent_registry() -> Dict[str, Agent]:
+    """
+    Lazily instantiate and cache the reusable agent instances.
+    """
+    global _agent_registry
+    if _agent_registry is not None:
+        return _agent_registry
+
+    _agent_registry = {
+        _CONTEXTUALIZER_STEP_NAME: _build_agent(
+            name=_CONTEXTUALIZER_STEP_NAME,
+            description="Normalizes raw telemetry into a structured context packet.",
+            instructions=CONTEXTUALIZER_INSTRUCTIONS,
+            tools=[DuckDuckGoTools()],
+        ),
+        _PRIORITIZATION_STEP_NAME: _build_agent(
+            name=_PRIORITIZATION_STEP_NAME,
+            description="Ranks backlog items with risk scores and owners.",
+            instructions=PRIORITIZATION_INSTRUCTIONS,
+        ),
+        _SUPPLY_CHAIN_STEP_NAME: _build_agent(
+            name=_SUPPLY_CHAIN_STEP_NAME,
+            description="Maps upstream/downstream dependencies and blast radius.",
+            instructions=SUPPLY_CHAIN_INSTRUCTIONS,
+        ),
+        _REMEDIATION_STEP_NAME: _build_agent(
+            name=_REMEDIATION_STEP_NAME,
+            description="Drafts tactical and strategic remediation actions.",
+            instructions=REMEDIATION_INSTRUCTIONS,
+        ),
+        _QA_STEP_NAME: _build_agent(
+            name=_QA_STEP_NAME,
+            description="Provides QA guardrails with structured confidence scoring.",
+            instructions=QA_REVIEW_INSTRUCTIONS,
+        ),
+        _EXEC_SUMMARY_STEP_NAME: _build_agent(
+            name=_EXEC_SUMMARY_STEP_NAME,
+            description="Translates the workflow output into an executive-ready narrative.",
+            instructions=EXECUTIVE_SUMMARY_INSTRUCTIONS,
+            tools=[DuckDuckGoTools()],
+        ),
+    }
+
+    return _agent_registry
 
 
 def _step_output_to_str(content: Any) -> str:
@@ -554,38 +633,13 @@ def initialize_ai_agents() -> Workflow:
     if _workflow is not None:
         return _workflow
 
-    contextualizer_agent = _build_agent(
-        name=_CONTEXTUALIZER_STEP_NAME,
-        description="Normalizes raw telemetry into a structured context packet.",
-        instructions=CONTEXTUALIZER_INSTRUCTIONS,
-        tools=[DuckDuckGoTools()],
-    )
-    prioritization_agent = _build_agent(
-        name=_PRIORITIZATION_STEP_NAME,
-        description="Ranks backlog items with risk scores and owners.",
-        instructions=PRIORITIZATION_INSTRUCTIONS,
-    )
-    supply_chain_agent = _build_agent(
-        name=_SUPPLY_CHAIN_STEP_NAME,
-        description="Maps upstream/downstream dependencies and blast radius.",
-        instructions=SUPPLY_CHAIN_INSTRUCTIONS,
-    )
-    remediation_agent = _build_agent(
-        name=_REMEDIATION_STEP_NAME,
-        description="Drafts tactical and strategic remediation actions.",
-        instructions=REMEDIATION_INSTRUCTIONS,
-    )
-    qa_review_agent = _build_agent(
-        name=_QA_STEP_NAME,
-        description="Provides QA guardrails with structured confidence scoring.",
-        instructions=QA_REVIEW_INSTRUCTIONS,
-    )
-    executive_summary_agent = _build_agent(
-        name=_EXEC_SUMMARY_STEP_NAME,
-        description="Translates the workflow output into an executive-ready narrative.",
-        instructions=EXECUTIVE_SUMMARY_INSTRUCTIONS,
-        tools=[DuckDuckGoTools()],
-    )
+    agent_registry = _get_agent_registry()
+    contextualizer_agent = agent_registry[_CONTEXTUALIZER_STEP_NAME]
+    prioritization_agent = agent_registry[_PRIORITIZATION_STEP_NAME]
+    supply_chain_agent = agent_registry[_SUPPLY_CHAIN_STEP_NAME]
+    remediation_agent = agent_registry[_REMEDIATION_STEP_NAME]
+    qa_review_agent = agent_registry[_QA_STEP_NAME]
+    executive_summary_agent = agent_registry[_EXEC_SUMMARY_STEP_NAME]
 
     _workflow = Workflow(
         name="cybersecurity_pipeline",
@@ -613,6 +667,66 @@ def initialize_ai_agents() -> Workflow:
     )
 
     return _workflow
+
+
+def initialize_agent_os() -> AgentOS:
+    """
+    Initialize AgentOS with the cybersecurity workflow so it can be served via FastAPI.
+    """
+    global _agent_os
+    if _agent_os is not None:
+        return _agent_os
+
+    if not os.getenv("OPENROUTER_API_KEY"):
+        raise RuntimeError(
+            "OPENROUTER_API_KEY is not configured. Set it before starting the AI analysis AgentOS."
+        )
+
+    workflow = initialize_ai_agents()
+    agent_registry = _get_agent_registry()
+    _agent_os = AgentOS(
+        id=os.getenv("AI_ANALYSIS_AGENT_OS_ID", "supply-chain-ai-analysis-os"),
+        name=os.getenv("AI_ANALYSIS_AGENT_OS_NAME",
+                       "Supply Chain AI Analysis OS"),
+        description="AgentOS exposing the multi-agent cybersecurity analysis workflow.",
+        workflows=[workflow],
+        agents=list(agent_registry.values()),
+    )
+    return _agent_os
+
+
+def get_agent_os_app() -> "FastAPI":
+    """
+    Build (or return cached) FastAPI app backed by AgentOS.
+    """
+    global _agent_os_app
+    if _agent_os_app is not None:
+        return _agent_os_app
+
+    agent_os = initialize_agent_os()
+    _agent_os_app = agent_os.get_app()
+    return _agent_os_app
+
+
+def serve_agent_os(
+    host: Optional[str] = None, port: Optional[int] = None, reload: bool = False, **kwargs: Any
+) -> None:
+    """
+    Convenience helper to start the AgentOS server (mirrors the AgentOS Demo snippet).
+    """
+    agent_os = initialize_agent_os()
+    fastapi_app = get_agent_os_app()
+    resolved_host = host or os.getenv("AI_ANALYSIS_AGENT_OS_HOST", "0.0.0.0")
+    resolved_port = port or _to_int(
+        os.getenv("AI_ANALYSIS_AGENT_OS_PORT", "7777"), 7777)
+
+    agent_os.serve(
+        app=fastapi_app,
+        host=resolved_host,
+        port=resolved_port,
+        reload=reload,
+        **kwargs,
+    )
 
 
 def run_ai_analysis(project_name: str, selected_scan_ids: Optional[List[str]] = None) -> Dict:
@@ -764,3 +878,7 @@ def get_ai_analyses_by_project(project_name: str) -> List[Dict]:
         pass
 
     return analyses
+
+
+if __name__ == "__main__":
+    serve_agent_os()
