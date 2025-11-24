@@ -14,6 +14,7 @@ from agno.db.postgres import PostgresDb
 from agno.vectordb.pgvector import PgVector
 from agno.knowledge.knowledge import Knowledge
 from agno.tools.duckduckgo import DuckDuckGoTools
+# from agno.tools.mcp import MCPTools
 from agno.models.openrouter import OpenRouter
 from agno.agent import Agent
 
@@ -446,6 +447,8 @@ def _build_agent(name: str, description: str, instructions: str, tools: Optional
         db=db,
         enable_user_memories=True,
         add_datetime_to_context=True,
+        add_history_to_context=True,
+        num_history_runs=1,
         markdown=True,
     )
 
