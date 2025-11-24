@@ -2,7 +2,6 @@
 AI analysis functions using Cybersecurity AI (CAI) framework
 """
 
-import agentops
 import json
 import os
 import sys
@@ -10,7 +9,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from agno.workflow.types import StepInput, StepOutput
 from agno.workflow import Loop, Parallel, Step, Workflow
-from agno.db.sqlite import SqliteDb
+from agno.db.sqlite import PostgresDb
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.models.openrouter import OpenRouter
 from agno.agent import Agent
@@ -92,9 +91,10 @@ _workflow: Optional[Workflow] = None
 
 CONTEXTUALIZER_INSTRUCTIONS = """
 You are contextualizer_agent (contextual_summary stage) for a software supply-chain security program.
-Work off the Trivy scan telemetry embedded in the user's message (bounded by <scan_data> tags).
+Work off the scan telemetry embedded in the user's message (bounded by <scan_data> tags).
+Use DuckDuckGoTools to search for more information about the scan.
 
-Trivy scan data includes:
+Scan data includes:
 - Vulnerabilities (CVEs) with CVSS scores (extract Base Score, Impact metrics C/I/A, Attack Vector, Complexity, User Interaction, Authentication)
 - EPSS scores (Exploit Prediction Scoring System) when available
 - Secret detection results (API keys, tokens, credentials)
@@ -135,7 +135,7 @@ Output markdown with the following section headers:
 
 PRIORITIZATION_INSTRUCTIONS = """
 You are prioritization_agent (prioritization_report stage).
-Input context contains the normalized Trivy scan summary from contextualizer_agent.
+Input context contains the normalized  scan summary from contextualizer_agent.
 
 **Risk Score Calculation Methodology**:
 Calculate Risk Score (1-25) = Impact Score (1-5) × Likelihood Score (1-5)
@@ -224,7 +224,7 @@ For each backlog item include:
 - likelihood_score (1-5): From multi-factor assessment
 - likelihood_breakdown: "EPSS:0.85(H), Exploit:Yes(M), Type:RCE(VH), Exposure:Multi-product+Internet(M)"
 - affected_assets: Specific images/repos/packages
-- severity: CRITICAL/HIGH/MEDIUM/LOW (from Trivy + Risk Score context)
+- severity: CRITICAL/HIGH/MEDIUM/LOW (from  Risk Score context)
 - rationale: Why it matters (exploit availability, data exposure, compliance impact, blast radius)
 - fix_available: YES/NO with version or workaround details
 - suggested_owner: Security/DevOps/AppTeam based on finding type
@@ -275,7 +275,7 @@ Include a dependency tree visualization (text-based) for critical items.
 
 REMEDIATION_INSTRUCTIONS = """
 You are remediation_agent (remediation_plan stage).
-You receive synthesized insight blending prioritization and supply-chain context from Trivy scans.
+You receive synthesized insight blending prioritization and supply-chain context from  scans.
 
 Produce three sections:
 
@@ -301,12 +301,12 @@ Each recommendation must include:
 - Owner: Specific team (Platform/Security/App Team X)
 - Timeframe: Specific dates or sprint numbers
 - Success criteria: Measurable outcomes (zero CRITICAL CVEs, all secrets rotated, scan results green)
-- Validation: How to verify (re-scan with Trivy, penetration test, audit log review)
+- Validation: How to verify (re-scan with , penetration test, audit log review)
 """.strip()
 
 QA_REVIEW_INSTRUCTIONS = f"""
 You are qa_review_agent (qa_review stage) ensuring the remediation plan is shippable.
-Evaluate completeness against Trivy scan characteristics and risk scoring methodology:
+Evaluate completeness against  scan characteristics and risk scoring methodology:
 
 **Risk Score Validation Checklist**:
 - All Risk Score ≥ 20 items have immediate remediation actions (within 48-72 hours)
@@ -343,7 +343,7 @@ Confidence: 0-1 float. Set should_continue=false when confidence ≥ {AI_ANALYSI
 
 EXECUTIVE_SUMMARY_INSTRUCTIONS = """
 You are executive_summary_agent (executive_summary stage).
-Create a stakeholder-ready narrative referencing Trivy scan results, risk scoring, and remediation plans:
+Create a stakeholder-ready narrative referencing  scan results, risk scoring, and remediation plans:
 
 **Executive Narrative** (2-3 paragraphs):
 - Current risk posture: Total vulnerabilities by risk tier (Critical 20-25, High 15-19, Medium 10-14, Low 5-9)
@@ -380,7 +380,7 @@ Impact ↑
 ```
 - CRITICAL (Risk 20-25): [List top 3 with CVE-ID, EPSS, Vuln Type, Affected Assets]
 - HIGH (Risk 15-19): [Summary count + common factors]
-- Compliance: [License issues, policy violations from Trivy]
+- Compliance: [License issues, policy violations from ]
 
 **Likelihood Factor Summary**:
 - X% of high-risk items have public exploits
