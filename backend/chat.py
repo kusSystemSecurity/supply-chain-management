@@ -15,7 +15,8 @@ from .storage import (
     get_vulnerabilities_by_scan,
     projects_storage,
     scans_storage,
-    vulnerabilities_storage
+    vulnerabilities_storage,
+    ai_analyses_storage
 )
 
 load_dotenv()
@@ -80,6 +81,13 @@ def get_projects_summary() -> str:
     return json.dumps(projects_storage, indent=2)
 
 
+def get_ai_analyses_summary() -> str:
+    """
+    Get a summary of all AI analyses.
+    """
+    return json.dumps(ai_analyses_storage, indent=2)
+
+
 def create_chat_agent() -> Agent:
     """
     Create and return the chat agent.
@@ -96,7 +104,8 @@ def create_chat_agent() -> Agent:
         - get_scans_summary: Lists all scans with high-level details.
         - get_scan_details_tool: Gets detailed info for a specific scan, including top vulnerabilities.
         - get_projects_summary: Lists all projects.
-        
+        - get_ai_analyses_summary: Lists all AI analyses.
+
         When answering:
         1. Be concise and helpful.
         2. Use markdown for formatting (tables, lists, code blocks).
@@ -104,7 +113,7 @@ def create_chat_agent() -> Agent:
         4. If a user asks about "critical" issues, filter the data accordingly.
         5. Always base your answers on the data returned by the tools.
         """,
-        tools=[get_scans_summary, get_scan_details_tool, get_projects_summary],
+        tools=[get_scans_summary, get_scan_details_tool, get_projects_summary, get_ai_analyses_summary],
         markdown=True,
         add_datetime_to_context=True,
     )
