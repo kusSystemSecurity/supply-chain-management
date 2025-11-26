@@ -7,6 +7,7 @@ import json
 from typing import List, Dict, Optional, Any
 from agno.agent import Agent
 from agno.models.openrouter import OpenRouter
+from agno.tools.duckduckgo import DuckDuckGoTools
 from dotenv import load_dotenv
 
 from .storage import (
@@ -112,8 +113,9 @@ def create_chat_agent() -> Agent:
         3. If a user asks about a specific scan, look it up.
         4. If a user asks about "critical" issues, filter the data accordingly.
         5. Always base your answers on the data returned by the tools.
+        6. If you need to search the web for information, use the DuckDuckGoTools.
         """,
-        tools=[get_scans_summary, get_scan_details_tool, get_projects_summary, get_ai_analyses_summary],
+        tools=[get_scans_summary, get_scan_details_tool, get_projects_summary, get_ai_analyses_summary, DuckDuckGoTools()],
         markdown=True,
         add_datetime_to_context=True,
     )
