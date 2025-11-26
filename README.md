@@ -55,6 +55,11 @@ docker run -d \
   pgvector/pgvector:pg17
 ```
 
+To restart the container:
+```bash
+docker start agno-postgres
+```
+
 ### Backend Setup
 
 1. Install Python dependencies:
@@ -74,7 +79,7 @@ docker run -d \
    uvicorn backend.ai_analysis:get_agent_os_app --factory --host 0.0.0.0 --port 7777
    ```
    The AgentOS server will be available at `http://localhost:7777`
-   
+
 3. Run FastAPI server:
    ```bash
    python run_api.py
