@@ -259,7 +259,6 @@ xyzservices==2025.10.0
 yarl==1.22.0
 zipp==3.23.0
 scikit-learn
-lightgbm
 xgboost
 matplotlib
 category_encoders
