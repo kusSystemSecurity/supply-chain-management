@@ -6,10 +6,11 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, r2_score
 from category_encoders import TargetEncoder
 import matplotlib.pyplot as plt
+from scipy.stats import spearmanr
 import joblib
 
 # ==========================================
-# 1. 데이터 로드 및 청소 (Unnamed 제거)
+# 1. 데이터 로드 및 청소
 # ==========================================
 print(">>> Loading and Cleaning Data...")
 df = pd.read_csv('Final_Dataset_with_EPSS.csv')
@@ -133,9 +134,11 @@ y_pred = 1 / (1 + np.exp(-y_pred_logit))
 # 성능 지표
 mae = mean_absolute_error(y_test_orig, y_pred)
 r2 = r2_score(y_test_orig, y_pred)
+spearman_corr, _ = spearmanr(y_test_orig, y_pred)
 
 print(f"MAE (평균 오차): {mae:.4f}")
 print(f"R2 Score (설명력): {r2:.4f}")
+print(f"Spearman Corr (순위) : {spearman_corr:.4f}")
 
 # 결과 샘플 확인
 results = pd.DataFrame({'Actual': y_test_orig, 'Predicted': y_pred})
@@ -168,10 +171,36 @@ def plot_actual_vs_predicted(y_true, y_pred):
 # 위에서 학습한 결과(y_test_orig, y_pred)를 넣어서 실행
 plot_actual_vs_predicted(y_test_orig, y_pred)
 
+def plot_rank_correlation(y_true, y_pred):
+    # 데이터를 등수(Rank)로 변환
+    # (점수가 높을수록 1등, method='min'은 동점 처리 방식)
+    true_ranks = pd.Series(y_true).rank(ascending=False, method='min')
+    pred_ranks = pd.Series(y_pred).rank(ascending=False, method='min')
+    
+    plt.figure(figsize=(10, 6))
+    
+    # 데이터가 너무 많으면 점이 겹치므로 투명도 조절 및 샘플링 고려
+    plt.scatter(true_ranks, pred_ranks, alpha=0.1, s=3, color='purple')
+    
+    # 완벽한 예측선 (y=x)
+    max_rank = max(true_ranks.max(), pred_ranks.max())
+    plt.plot([1, max_rank], [1, max_rank], 'r--', label='Perfect Ranking')
+    
+    plt.title(f'Rank Correlation (Spearman: {spearman_corr:.4f})')
+    plt.xlabel('Actual Rank')
+    plt.ylabel('Predicted Rank')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.show() # 또는 plt.savefig('rank_correlation.png')
+
+print("\n>>> Drawing Rank Plot...")
+plot_rank_correlation(y_test_orig, y_pred)
+
 print("\n>>> Saving Model & Metadata...")
 
 # ==========================================
-# 6. 모델 및 인코더 저장 (수정됨)
+# 6. 모델 및 인코더 저장
 # ==========================================
 print("\n>>> Saving Model & Encoder...")
 
