@@ -34,8 +34,9 @@ print("\n>>> Feature Engineering...")
 df['Publication'] = pd.to_datetime(df['Publication'])
 current_date = pd.to_datetime('today')
 df['days_since_published'] = (current_date - df['Publication']).dt.days
+df['pub_month'] = df['Publication'].dt.month # [NEW] 월(Month) 정보 추가 (계절성)
 
-# 2-2. [NEW] CWE ID 추출 및 정제
+# 2-2. CWE ID 추출 및 정제
 # CWE 컬럼이 지저분할 수 있으므로 첫 번째 ID만 깔끔하게 가져옵니다.
 def extract_cwe(cwe_str):
     if pd.isna(cwe_str) or not isinstance(cwe_str, str):
@@ -48,9 +49,9 @@ def extract_cwe(cwe_str):
 
 df['CWE_Clean'] = df['CWE'].apply(extract_cwe)
 
-# 2-3. [NEW] 위험 키워드 추출 (Simple NLP)
+# 2-3. 위험 키워드 추출 (Simple NLP)
 # 설명(Description)에 이 단어들이 있으면 위험도가 급상승합니다.
-danger_keywords = ['remote', 'execution', 'code', 'command', 'admin', 'root', 'unauthenticated', 'injection']
+danger_keywords = ['remote', 'execution', 'code', 'command', 'admin', 'root', 'unauthenticated', 'injection', 'overflow']
 
 print("   Extracting Danger Keywords...")
 # 대소문자 무시하고 단어가 포함되어 있으면 1, 없으면 0
@@ -63,7 +64,7 @@ print("   Calculating Vendor Popularity...")
 vendor_counts = df['Vendor'].value_counts()
 df['vendor_count'] = df['Vendor'].map(vendor_counts).fillna(0)
 
-# 2-2. CVSS v3 벡터 파싱 (핵심 정보 추출)
+# 2-4. CVSS v3 벡터 파싱 (핵심 정보 추출)
 # 예: CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H
 
 def parse_cvss_vector(vector_str):
@@ -88,6 +89,23 @@ vector_df = vector_df.reindex(columns=cols_to_use, fill_value='Unknown')
 # 원본 데이터와 합치기
 df = pd.concat([df, vector_df], axis=1)
 
+# 치명적 조합 (Easy RCE Flag)
+# ----------------------------------------------------------------
+# AV:N (네트워크) + AC:L (복잡도 낮음) + PR:N (권한 필요없음)
+# 이 조합은 해커가 가장 좋아하는 "자동화 공격" 대상
+print("   Creating Interaction Features...")
+df['is_critical_combo'] = (
+    (df['AV'] == 'N') & 
+    (df['AC'] == 'L') & 
+    (df['PR'] == 'N')
+).astype(int)
+
+# ----------------------------------------------------------------
+# 설명글 길이 (Meta Feature)
+# ----------------------------------------------------------------
+print("   Calculating Description Length...")
+df['desc_length'] = df['DESCRIPTION'].str.len().fillna(0)
+
 # ==========================================
 # 3. 학습 데이터 준비
 # ==========================================
@@ -97,8 +115,11 @@ features = [
     'days_since_published',# 경과 일수
     'Vendor',      # 벤더 위험도
     'Product',     # 제품 위험도
-    'CWE_Clean',         # [NEW] 취약점 종류
-    'vendor_count',      # [NEW] 벤더 인기도
+    'CWE_Clean',         # 취약점 종류
+    'vendor_count',      # 벤더 인기도
+    'pub_month',
+    'desc_length',
+    'is_critical_combo'
 ] 
 features += [f'keyword_{word}' for word in danger_keywords] # [NEW] 위험 키워드들
 # 위에서 뽑은 벡터 항목들(AV, AC 등)을 One-Hot Encoding
@@ -117,6 +138,24 @@ y_transformed = np.log(np.clip(y, epsilon, 1-epsilon) / (1 - np.clip(y, epsilon,
 X_train, X_test, y_train, y_test = train_test_split(X, y_transformed, test_size=0.2, random_state=42)
 # 평가용 원본 y (Logit 변환 전)
 _, _, y_train_orig, y_test_orig = train_test_split(X, y, test_size=0.2, random_state=42)
+
+print("   Calculating Vendor Stats (Train set only)...")
+
+# Train 데이터의 Vendor별 CVSS 평균 계산
+train_indices = X_train.index
+train_vendor_stats = df.loc[train_indices].groupby('Vendor')['v3 CVSS'].mean()
+global_cvss_mean = df.loc[train_indices]['v3 CVSS'].mean()
+
+# Dictionary로 변환 (저장하기 위해)
+vendor_cvss_map = train_vendor_stats.to_dict()
+
+# Train에 매핑
+X_train['vendor_mean_cvss'] = X_train['Vendor'].map(vendor_cvss_map).fillna(global_cvss_mean)
+
+# Test에 매핑 (Train에서 구한 맵을 그대로 사용!)
+X_test['vendor_mean_cvss'] = X_test['Vendor'].map(vendor_cvss_map).fillna(global_cvss_mean)
+
+print("   Stats Feature Created.")
 
 # 3-3. Target Encoding 적용
 print("   Applying Target Encoding safely...")
@@ -152,7 +191,13 @@ model = xgb.XGBRegressor(
     objective='reg:squarederror'
 )
 
-model.fit(X_train, y_train, sample_weight=sample_weights)
+# eval_set을 추가하여 학습 중간중간 점수를 기록합니다.
+model.fit(
+    X_train, y_train, 
+    sample_weight=sample_weights,
+    eval_set=[(X_train, y_train), (X_test, y_test)], # Train과 Test 둘 다 감시
+    verbose=100 # 100번마다 로그 출력
+)
 
 # ==========================================
 # 5. 예측 및 평가
@@ -234,6 +279,25 @@ print("\n[Top 10 Feature Importance]")
 importance = pd.Series(model.feature_importances_, index=X_train.columns).sort_values(ascending=False)
 print(importance.head(10))
 
+print("\n[과적합 자가진단]")
+train_pred = model.predict(X_train)
+test_pred = model.predict(X_test)
+
+# Logit -> Sigmoid 복원
+train_score = r2_score(y_train_orig, 1 / (1 + np.exp(-train_pred)))
+test_score = r2_score(y_test_orig, 1 / (1 + np.exp(-test_pred)))
+
+print(f"Train R2 : {train_score:.4f}")
+print(f"Test  R2 : {test_score:.4f}")
+
+diff = train_score - test_score
+if diff > 0.15:
+    print(f"경고: 차이가 {diff:.4f}로 큽니다. 과적합 의심! (max_depth를 줄이세요)")
+elif diff < 0.05:
+    print(f"안심: 차이가 {diff:.4f}로 매우 작습니다. 학습이 아주 잘 되었습니다.")
+else:
+    print(f"주의: 차이가 {diff:.4f}입니다. 약간의 과적합이 있지만 허용 범위입니다.")
+
 print("\n>>> Saving Model & Metadata...")
 
 # ==========================================
@@ -258,8 +322,11 @@ joblib.dump(model, model_path)
 joblib.dump(encoder, encoder_path)
 
 # 3. 추가 메타데이터 (컬럼 순서 맞추기용)
+# 메타데이터에 'vendor_cvss_map' 추가
 meta_data = {
-    'columns': X_train.columns.tolist()  # 학습할 때 최종적으로 사용된 컬럼 순서
+    'columns': X_train.columns.tolist(),
+    'vendor_cvss_map': vendor_cvss_map,   # 벤더별 평균 점수표
+    'global_cvss_mean': global_cvss_mean  # 전체 평균 점수
 }
 joblib.dump(meta_data, meta_path)
 

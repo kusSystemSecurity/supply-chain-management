@@ -17,9 +17,11 @@ class EPSSPredictor:
         
         # 학습 때 사용된 컬럼 순서
         self.model_cols = self.meta['columns']
+        self.vendor_cvss_map = self.meta.get('vendor_cvss_map', {})
+        self.global_cvss_mean = self.meta.get('global_cvss_mean', 0.0)
         
         # 위험 키워드 목록 (학습 때와 동일해야 함)
-        self.danger_keywords = ['remote', 'execution', 'code', 'command', 'admin', 'root', 'unauthenticated', 'injection']
+        self.danger_keywords = ['remote', 'execution', 'code', 'command', 'admin', 'root', 'unauthenticated', 'injection', 'overflow']
 
     def _parse_cvss_vector(self, vector_str):
         """CVSS 벡터 문자열 파싱 (내부 함수)"""
@@ -71,7 +73,14 @@ class EPSSPredictor:
 
         # D. Vendor Count (실시간 예측에선 알 수 없으므로 0 처리)
         # (학습 때는 전체 통계가 있었지만, 단건 예측에선 0으로 채워도 무방함)
-        input_df['vendor_count'] = 0 
+        input_df['vendor_count'] = 0
+
+        vendor_name = input_df.iloc[0].get('Vendor')
+        if vendor_name in self.vendor_cvss_map:
+            input_df['vendor_mean_cvss'] = self.vendor_cvss_map[vendor_name]
+        else:
+            # 처음 보는 벤더면 전체 평균 사용 (Smoothing 효과)
+            input_df['vendor_mean_cvss'] = self.global_cvss_mean
 
         # E. CVSS Vector 파싱
         if 'v3 Vector' in input_df.columns:
