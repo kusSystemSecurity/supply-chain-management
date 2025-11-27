@@ -8,6 +8,7 @@ from category_encoders import TargetEncoder
 import matplotlib.pyplot as plt
 from scipy.stats import spearmanr
 import joblib
+import re
 
 # ==========================================
 # 1. 데이터 로드 및 청소
@@ -33,6 +34,34 @@ print("\n>>> Feature Engineering...")
 df['Publication'] = pd.to_datetime(df['Publication'])
 current_date = pd.to_datetime('today')
 df['days_since_published'] = (current_date - df['Publication']).dt.days
+
+# 2-2. [NEW] CWE ID 추출 및 정제
+# CWE 컬럼이 지저분할 수 있으므로 첫 번째 ID만 깔끔하게 가져옵니다.
+def extract_cwe(cwe_str):
+    if pd.isna(cwe_str) or not isinstance(cwe_str, str):
+        return 'Unknown'
+    # 숫자만 추출하거나 'CWE-123' 형식 유지
+    match = re.search(r'(CWE-\d+)', cwe_str)
+    if match:
+        return match.group(1)
+    return 'Unknown'
+
+df['CWE_Clean'] = df['CWE'].apply(extract_cwe)
+
+# 2-3. [NEW] 위험 키워드 추출 (Simple NLP)
+# 설명(Description)에 이 단어들이 있으면 위험도가 급상승합니다.
+danger_keywords = ['remote', 'execution', 'code', 'command', 'admin', 'root', 'unauthenticated', 'injection']
+
+print("   Extracting Danger Keywords...")
+# 대소문자 무시하고 단어가 포함되어 있으면 1, 없으면 0
+for word in danger_keywords:
+    df[f'keyword_{word}'] = df['DESCRIPTION'].str.contains(word, case=False, na=False).astype(int)
+
+# 2-4. [NEW] 벤더/제품 빈도수 (Frequency Encoding)
+# "해커들은 인기 있는 제품을 노린다"는 가설
+print("   Calculating Vendor Popularity...")
+vendor_counts = df['Vendor'].value_counts()
+df['vendor_count'] = df['Vendor'].map(vendor_counts).fillna(0)
 
 # 2-2. CVSS v3 벡터 파싱 (핵심 정보 추출)
 # 예: CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H
@@ -68,7 +97,10 @@ features = [
     'days_since_published',# 경과 일수
     'Vendor',      # 벤더 위험도
     'Product',     # 제품 위험도
+    'CWE_Clean',         # [NEW] 취약점 종류
+    'vendor_count',      # [NEW] 벤더 인기도
 ] 
+features += [f'keyword_{word}' for word in danger_keywords] # [NEW] 위험 키워드들
 # 위에서 뽑은 벡터 항목들(AV, AC 등)을 One-Hot Encoding
 categorical_features = ['AV', 'AC', 'PR', 'UI', 'S'] # C, I, A는 점수에 이미 반영됨
 X = df[features]
@@ -90,7 +122,7 @@ _, _, y_train_orig, y_test_orig = train_test_split(X, y, test_size=0.2, random_s
 print("   Applying Target Encoding safely...")
 
 # min_samples_leaf=20: 데이터가 20개 미만인 벤더는 전체 평균값으로 스무딩
-encoder = TargetEncoder(cols=['Vendor', 'Product'], min_samples_leaf=20, smoothing=10)
+encoder = TargetEncoder(cols=['Vendor', 'Product', 'CWE_Clean'], min_samples_leaf=20, smoothing=10)
 
 # 학습 데이터(X_train)로만 학습(fit)하고 변환(transform)
 X_train = encoder.fit_transform(X_train, y_train_orig) # 주의: y는 변환 전 원본 점수(0~1)를 쓰는 게 일반적임
@@ -110,7 +142,7 @@ sample_weights = 1 + (y_train_orig * 10)
 model = xgb.XGBRegressor(
     n_estimators=1000,
     learning_rate=0.03,
-    max_depth=6,
+    max_depth=7,
     subsample=0.8,
     colsample_bytree=0.8,
     reg_alpha=0.1,           # L1 규제: 불필요한 노이즈 무시
@@ -196,6 +228,11 @@ def plot_rank_correlation(y_true, y_pred):
 
 print("\n>>> Drawing Rank Plot...")
 plot_rank_correlation(y_test_orig, y_pred)
+
+# 변수 중요도 확인 (새로 넣은 게 쓸모 있었나?)
+print("\n[Top 10 Feature Importance]")
+importance = pd.Series(model.feature_importances_, index=X_train.columns).sort_values(ascending=False)
+print(importance.head(10))
 
 print("\n>>> Saving Model & Metadata...")
 
