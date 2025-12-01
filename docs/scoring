@@ -1,0 +1,51 @@
+## **Score details**
+
+### **Risk score**
+
+Calculated by multiplying the impact score by the likelihood score, generating a value between 1 and 25.
+
+### **Impact score**
+
+Calculated using C, I, A impact values from CVSS scores
+
+### **Likelihood score**
+
+How likely is this CVE to actually create a problem?
+
+There is already EPSS which measures exploitability, and CVSS for general purpose scoring, by adding yet another score we are aiming to consolidate multiple factors including scores, product and CVE exposure, popularity (i.e where and how the issue is mentioned) etc.
+
+We first calculate a % value, to be used for finer grained prioritization, then convert the % value to a likelihood score value between 1 and 5.
+
+### **CVSS**
+
+We take CVSS scores into account for calculating likelihood. Access, user interaction, authentication requirements and complexity components are used in the calculation of likelihood.
+
+### **EPSS**
+
+Contribution of EPSS score for this likelihood score: Maximum
+
+Higher the EPSS higher the risk, while a low EPSS value does not imply a low risk.
+
+### **Exploitation**
+
+Contribution of exploitation factors for this likelihood score:
+
+- None
+
+Calculated taking into account factors like whether a public exploit exists or not, if the CVE is in CISA KEV catalog, if it's mentioned in an exploit source or not.
+
+### **Vulnerability type/category**
+
+Contribution of vulnerability type/category for this likelihood score: Very high risk vulnerability category
+
+Vulnerabilities that may lead to code execution such as sql injection represent higher risk than others.
+
+### **Exposure**
+
+Contribution of exposure factors for this likelihood score:
+
+- Affects a product exposed to the internet
+- Too many men tions
+- Mentioned in too many sources
+
+Calculated by taking into account factors such as whether the CVE is detectable over the internet or not, if it affects a product exposed to the internet, number and variety of mentions, number and variety of affected products
