@@ -3,6 +3,8 @@ Simple Gradio App for Supply Chain Security Scanning
 A simplified Python-only interface for the SecureChain AI platform.
 """
 
+import os
+import sys
 import gradio as gr
 from typing import List
 
@@ -33,6 +35,37 @@ from backend import (
     get_ai_analyses_by_project,
 )
 
+# ==========================================
+# EPSS 예측기 로드 설정
+# ==========================================
+try:
+    # backend/epss_predict 폴더를 경로에 추가하여 모듈 찾기
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    epss_dir = os.path.join(current_dir, "backend", "epss_predict")
+    sys.path.append(current_dir) # backend 모듈용
+
+    from backend.epss_predict.epss_predictor import EPSSPredictor
+    
+    # 모델 파일 경로 지정
+    model_path = os.path.join(epss_dir, 'xgboost_epss_model.pkl')
+    encoder_path = os.path.join(epss_dir, 'target_encoder.pkl')
+    meta_path = os.path.join(epss_dir, 'model_metadata.pkl')
+
+    # 예측기 초기화 (한 번만 로드)
+    if os.path.exists(model_path):
+        AI_PREDICTOR = EPSSPredictor(
+            model_path=model_path,
+            encoder_path=encoder_path,
+            meta_path=meta_path
+        )
+        print("✅ AI EPSS Predictor loaded successfully!")
+    else:
+        print(f"⚠️ Prediction model files not found at {epss_dir}. Skipping AI prediction.")
+        AI_PREDICTOR = None
+
+except Exception as e:
+    print(f"⚠️ Failed to load AI Predictor: {e}")
+    AI_PREDICTOR = None
 
 # ============= Gradio Interface Functions =============
 
@@ -82,6 +115,43 @@ def trigger_scan(scan_type: str, target: str) -> str:
             trivy_data = scan_result["data"]
             vulnerabilities = parse_trivy_vulnerabilities(
                 trivy_data, scan["id"])
+            
+            # ========================================================
+            # AI EPSS Prediction Logic
+            # EPSS 점수가 없는(None) 경우에만 예측 수행
+            # ========================================================
+            if AI_PREDICTOR:
+                print("🧠 Running AI prediction for missing EPSS scores...")
+                pred_count = 0
+                for vuln in vulnerabilities:
+                    # epss_score가 None이거나 비어있을 때 예측
+                    if vuln.get("epss_score") is None:
+                        try:
+                            # 모델 입력 데이터 구성
+                            # (Trivy 파싱 데이터에서 필요한 필드를 매핑)
+                            pred_input = {
+                                'ID': vuln.get('cve_id'),
+                                'Publication': vuln.get('published_date'), # 파싱 함수에서 이 필드를 주는지 확인 필요 (없으면 오늘 날짜로 계산됨)
+                                'Vendor': vuln.get('package_name'),
+                                'Product': vuln.get('package_name'), # 패키지명을 제품명으로 가정
+                                'v3 CVSS': vuln.get('cvss_score', 0.0),
+                                'v3 Vector': vuln.get('cvss_vector', '') # 벡터 문자열
+                            }
+                            
+                            # 예측 실행
+                            pred_score = AI_PREDICTOR.predict(pred_input)
+                            
+                            # 결과 업데이트
+                            vuln["epss_score"] = pred_score
+                            vuln["epss_percentile"] = 0.0 # 예측값은 백분위 정보가 없으므로 0 처리
+                            vuln["is_predicted"] = True # UI 표시용 플래그 추가
+                            pred_count += 1
+                        except Exception as pe:
+                            print(f"Prediction failed for {vuln.get('cve_id')}: {pe}")
+                
+                if pred_count > 0:
+                    print(f"✅ AI Predicted EPSS scores for {pred_count} vulnerabilities.")
+            # ========================================================
 
             # Store vulnerabilities
             for vuln in vulnerabilities:
@@ -255,8 +325,16 @@ def get_scan_vulnerabilities(scan_id: str) -> tuple:
                 cvss = vuln.get("cvss_score")
                 cvss_str = f"{cvss:.2f}" if cvss is not None else "N/A"
 
+                # EPSS 점수 표시 로직
                 epss = vuln.get("epss_score")
-                epss_str = f"{epss:.3f}" if epss is not None else "N/A"
+                is_predicted = vuln.get("is_predicted", False)  # 예측된 값인지 확인
+                
+                if epss is not None:
+                    epss_str = f"{epss:.4f}" # 소수점 4자리까지 표시
+                    if is_predicted:
+                        epss_str += " (AI)" # AI 예측값임을 표시
+                else:
+                    epss_str = "N/A"
 
                 epss_percentile = vuln.get("epss_percentile")
                 epss_percentile_str = (
